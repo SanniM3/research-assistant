@@ -72,6 +72,8 @@ The completed literature review is written to `samples/literature_review.md`
 
 - [ ] **Chain of Verification** - Incorporate a verification step to ensure all answers and citations in the literature review are consistent, accurate, and properly referenced.
 - [ ]  **Memory**
+- [ ]  **Translate tool** - Can be the llm itself
+
 
 ---
 
