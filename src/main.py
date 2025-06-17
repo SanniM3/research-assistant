@@ -1,0 +1,47 @@
+import os
+from dotenv import load_dotenv
+from .agents import create_research_graph, ResearchState
+
+load_dotenv()
+
+class ResearchAssistant:
+    def __init__(self):
+        self.graph = create_research_graph()
+    
+    def research(self, question: str) -> str:
+        """
+        Conduct research on a given question and return either a short answer
+        or a detailed report based on the question's complexity.
+        """
+        # Initialize the state
+        state = ResearchState(question=question)
+        
+        # Run the research workflow
+        final_state = self.graph.invoke(state)
+        
+        # Return appropriate output based on answer format
+        if final_state.answer_format == "short":
+            return final_state.short_answer
+        else:
+            return final_state.report
+
+def main():
+    # Example usage
+    assistant = ResearchAssistant()
+    
+    # Example questions
+    questions = [
+        "What is the current state of quantum computing?",  # Likely to get a long report
+        "What is the capital of France?",  # Likely to get a short answer
+        "How does climate change affect coral reefs?"  # Likely to get a long report
+    ]
+    
+    for question in questions:
+        print(f"\nResearching: {question}")
+        result = assistant.research(question)
+        print("\nResult:")
+        print(result)
+        print("\n" + "="*80)
+
+if __name__ == "__main__":
+    main() 

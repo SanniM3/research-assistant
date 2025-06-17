@@ -4,3 +4,8 @@ langchain-community
 langchain-openai
 tavily-python
 wikipedia
+arxiv
+biopython  # For PubMed
+pypdf   # For PDF reading
+beautifulsoup4  # For web scraping
+python-dotenv

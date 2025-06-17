@@ -1,9 +1,0 @@
-You will be given a conversation between a researcher and a domain expert done while conducting research on a topic.
-
-Your goal is to generate a well-structured query for use in retrieval and/or web search related to the conversation.
-
-First, analyze the full conversation.
-
-Pay particular attention to the final question.
-
-Convert this final question into a well-structured web search query.

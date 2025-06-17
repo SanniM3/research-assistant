@@ -1,83 +1,115 @@
-# LangGraph Research Assistant
+# Multi-Agent Research Assistant
 
-This project is a multi-agent research assistant built using [LangGraph](https://docs.langchain.com/langgraph/). It automates the literature review process by coordinating a team of specialized AI researchers. 
+A multi-agent system built with LangGraph for conducting deep research across various domains. The system uses a hierarchical manager-worker architecture to coordinate research tasks and generate comprehensive reports.
 
----
+## Features
 
-## Project Structure
+- **Hierarchical Agent Architecture**
+  - Manager Agent (Orchestrator)
+  - ToolCallingAgent (Research Worker)
+  - ReportWriterAgent
+  - ReportRefinerAgent
 
+- **Comprehensive Research Tools**
+  - ArxivTool for academic papers
+  - PubMedTool for medical literature
+  - TavilyTool for web search
+  - VisualQATool for image analysis
+  - FileReaderTool for PDFs and web pages
+
+- **Workflow**
+  - Automatic determination of output type (single answer vs. detailed report)
+  - Report refinement loop
+  - Quality control mechanisms
+
+## Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/research-assistant.git
+cd research-assistant
 ```
-repo-root/
-│
-├── main.py                   # CLI script to run the research assistant
-├── requirements.txt          
-├── samples/literature_review.md      # Output report file 
-│
-├── src/
-│   ├── graph/
-│   │   ├── __init__.py       
-│   │   ├── builder.py        # Assembles the full graph
-│   │   ├── nodes.py          # Contains the node functions and tools
-│   │   ├── types.py          # Contains data schemas for researchers and state
-│   │
-│   ├── prompts/
-│   │   ├── create_researchers.txt      # Prompt template to create research agents
-│   │   ├── search_instructions.txt     # Prompt template to write search queries
-│   │   ├── answer_instructions.txt     # Prompt template to answer questions with citations
-│   │   ├── report_writer.txt           # Prompt template to compile findings into a paper
-```
 
----
-
-## How to Run
-
-### 1. Install Dependencies
-
-Ensure you're using Python 3.10+ and run:
-
+2. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-You also need to set your OpenAI_API_KEY, TAVILY_API_KEY and LANGCHAIN_API_KEY in a `.env` file:
-
-### 2. Run the Assistant
-
-From your terminal, run:
-
-```bash
-python main.py
+3. Set up environment variables:
+Create a `.env` file in the project root with the following variables:
+```
+OPENAI_API_KEY=your_openai_api_key
+TAVILY_API_KEY=your_tavily_api_key
+ENTREZ_EMAIL=your_email@example.com
 ```
 
-You will be prompted to enter:
-- A research topic
-- An initial draft or background (e.g., survey description)
+## Usage
 
-Then, a team of AI researchers will be created. You can iteratively provide feedback on the team design before proceeding. Once finalized, each researcher runs their literature review process, and the findings are compiled into a final report.
+```python
+from src.main import ResearchAssistant
 
----
+# Initialize the assistant
+assistant = ResearchAssistant()
 
-## Output
+# Conduct research
+result = assistant.research("What is the current state of quantum computing?")
+print(result)
+```
 
-The completed literature review is written to `samples/literature_review.md`
+## Project Structure
 
+```
+research-assistant/
+├── src/
+│   ├── __init__.py
+│   ├── main.py          # Main application entry point
+│   ├── agents.py        # Agent definitions and graph
+│   └── tools.py         # Research tools implementation
+├── requirements.txt     # Project dependencies
+├── README.md           # Project documentation
+└── .env               # Environment variables (create this)
+```
 
-## To-Do
+## Agent Roles
 
-- [ ] **Add arXiv Search Retriever**  to fetch full papers (not just abstracts) for more grounding.
+### Manager Agent
+- Receives user questions
+- Determines output type (single answer vs. report)
+- Coordinates with other agents
+- Ensures quality of final output
 
-- [ ] **Clarification Node** that asks clarifying questions from the user if the agent is unsure about the direction of the research.
+### ToolCallingAgent
+- Conducts deep research using various tools
+- Generates and refines search queries
+- Evaluates research quality
+- Returns consolidated findings
 
-- [ ] **Memory of Prior Feedback** - persist all previous human feedback during researcher creation to avoid repeating the same mistakes in refinement.
+### ReportWriterAgent
+- Creates structured reports from findings
+- Organizes content logically
+- Highlights key insights
+- Maintains academic rigor
 
-- [ ] **Chain of Verification** - Incorporate a verification step to ensure all answers and citations in the literature review are consistent, accurate, and properly referenced.
-- [ ]  **Memory**
-- [ ]  **Translate tool** - Can be the llm itself
-- [ ]  **Save intermediate states** - So that the process can be interrupted (maybe for human feedback) and then continued from the saved state + feedback
+### ReportRefinerAgent
+- Critically evaluates reports
+- Suggests improvements
+- Ensures clarity and coherence
+- Maintains quality standards
 
+## Contributing
 
----
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a Pull Request
 
-## 📜 License
+## License
 
-This project is licensed under the [MIT License](https://opensource.org/licenses/MIT).
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- LangGraph for the graph-based agent framework
+- OpenAI for the language models
+- Various API providers for research tools
