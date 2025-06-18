@@ -18,8 +18,8 @@ class ResearchAssistant:
         state = ResearchState(question=question)
         
         # Run the research workflow
-        final_state = self.graph.invoke(state, config=self.config)
-        
+        self.graph.invoke(state, config=self.config)
+        final_state = self.graph.get_state(thread_id=self.config["configurable"]["thread_id"])
         # print(f"Final state: {final_state}")    
         # Return appropriate output based on answer format
         if final_state.answer_format == "short":

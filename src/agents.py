@@ -20,7 +20,7 @@ class ResearchState(BaseModel):
     messages: list = Field(default_factory=list)
     findings: list = Field(default_factory=list)
     depth: int = 0
-    max_depth: int = 3
+    max_depth: int = 1
     is_sufficient: bool = False
 
     
@@ -35,6 +35,7 @@ def manager_node(state: ResearchState) -> ResearchState:
     ])
     print(f"Manager response: {response}")
     state.answer_format = "long" if "long" in response.content.lower() else "short"
+    print(state.answer_format)
     return state
 
 # Node: Short answer extraction
