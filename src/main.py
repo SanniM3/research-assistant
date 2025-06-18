@@ -26,10 +26,7 @@ class ResearchAssistant:
             return final_state.report
 
 def main():
-    # Example usage
     assistant = ResearchAssistant()
-    
-    # Example questions
     questions = [
         "What is the current state of quantum computing?",  # Likely to get a long report
         # "What is the capital of France?",  # Likely to get a short answer

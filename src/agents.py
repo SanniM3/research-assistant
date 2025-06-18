@@ -32,7 +32,8 @@ def manager_node(state: ResearchState) -> ResearchState:
         SystemMessage(content="You are a research manager agent that coordinates deep research tasks. Your role is to: 1. Analyze the user's question 2. Determine if a short answer or detailed report is needed. Return either 'short' or 'long' as your answer."),
         HumanMessage(content=state.question)
     ])
-    state.answer_format = "long" if "long" in response["content"].lower() else "short"
+    print(f"Manager response: {response}")
+    state.answer_format = "long" if "long" in response.content.lower() else "short"
     return state
 
 # Node: Short answer extraction
@@ -43,7 +44,7 @@ def short_answer_node(state: ResearchState) -> ResearchState:
         SystemMessage(content="You are an expert at extracting concise, accurate answers from research findings. Your role is to: 1. Analyze the research findings 2. Extract the most relevant information 3. Formulate a clear, concise answer 4. Ensure accuracy and completeness"),
         HumanMessage(content=f"Based on these findings: {state.findings}\nExtract a concise answer to: {state.question}")
     ])
-    state.short_answer = response["content"]
+    state.short_answer = response.content
     return state
 
 # Node: Report writer
@@ -54,7 +55,7 @@ def report_writer_node(state: ResearchState) -> ResearchState:
         SystemMessage(content="You are a report writer that creates well-structured research reports. Your role is to: 1. Organize findings into logical sections 2. Create clear and concise summaries 3. Highlight key insights and evidence 4. Maintain academic rigor and clarity 5. Analyze the reviewer's evaluation and improve the report accordingly"),
         HumanMessage(content=f"Findings: {state.findings}.\n\n Reviewer's evaluation: {state.evaluation}")
     ])
-    state.report = response["content"]
+    state.report = response.content
     return state
 
 # Node: Report refiner
@@ -65,8 +66,8 @@ def report_refiner_node(state: ResearchState) -> ResearchState:
         SystemMessage(content="You are a report refiner that improves research reports. Your role is to: 1. Critically evaluate report quality as it applies to the user's question 2. Suggest specific improvements 3. Ensure clarity and coherence 4. Maintain academic standards 5. If the report has reached a high quality, return 'acceptable' only, otherwise return the suggestions for improvement"),
         HumanMessage(content=f"User's question: {state.question}\n\n Report: {state.report}")
     ])
-    state.evaluation = response["content"]
-    state.is_satisfactory = "acceptable" in response["content"].lower()
+    state.evaluation = response.content
+    state.is_satisfactory = "acceptable" in response.content.lower()
     state.refinement_count += 1
     return state
 
@@ -121,7 +122,7 @@ def create_deep_research_subgraph():
     builder.add_conditional_edges('llm_with_tools', tools_condition)
     builder.add_edge('tools', 'aggregate_findings')
     builder.add_edge('aggregate_findings', 'review_findings')
-    builder.add_edge('review_findings', should_continue_or_return)
+    builder.add_conditional_edges('review_findings', should_continue_or_return)
     # builder.add_edge('llm_with_tools', END)
     return builder.compile()
 
@@ -130,8 +131,8 @@ def route_after_research(state: ResearchState) -> str:
 
 def should_continue_refinement(state: ResearchState) -> str:
     if state.is_satisfactory or state.refinement_count >= 3:
-        return "end"
-    return "refine"
+        return END
+    return "write_report"
 
 def create_research_graph() -> StateGraph:
     workflow = StateGraph(ResearchState)
@@ -140,10 +141,10 @@ def create_research_graph() -> StateGraph:
     workflow.add_node("get_short_answer", short_answer_node)
     workflow.add_node("write_report", report_writer_node)
     workflow.add_node("refine_report", report_refiner_node)
+    workflow.add_edge(START, "manager")
     workflow.add_edge("manager", "research")
-    workflow.add_edge("research", route_after_research)
-    workflow.add_edge("get_short_answer", "end")
+    workflow.add_conditional_edges("research", route_after_research)
+    workflow.add_edge("get_short_answer", END)
     workflow.add_edge("write_report", "refine_report")
-    workflow.add_edge("refine_report", should_continue_refinement)
-    workflow.set_entry_point("manager")
+    workflow.add_conditional_edges("refine_report", should_continue_refinement)
     return workflow.compile() 
