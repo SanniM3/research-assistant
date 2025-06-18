@@ -136,9 +136,10 @@ def should_continue_refinement(state: ResearchState) -> str:
     return "write_report"
 
 def create_research_graph() -> StateGraph:
+    deep_research = create_deep_research_subgraph()
     workflow = StateGraph(ResearchState)
     workflow.add_node("manager", manager_node)
-    workflow.add_node("research", create_deep_research_subgraph)
+    workflow.add_node("research", deep_research)
     workflow.add_node("get_short_answer", short_answer_node)
     workflow.add_node("write_report", report_writer_node)
     workflow.add_node("refine_report", report_refiner_node)

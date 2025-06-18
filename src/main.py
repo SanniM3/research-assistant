@@ -7,6 +7,7 @@ load_dotenv()
 class ResearchAssistant:
     def __init__(self):
         self.graph = create_research_graph()
+        self.config = {"configurable": {"thread_id": "1"}}
     
     def research(self, question: str) -> str:
         """
@@ -17,8 +18,9 @@ class ResearchAssistant:
         state = ResearchState(question=question)
         
         # Run the research workflow
-        final_state = self.graph.invoke(state)
+        final_state = self.graph.invoke(state, config=self.config)
         
+        # print(f"Final state: {final_state}")    
         # Return appropriate output based on answer format
         if final_state.answer_format == "short":
             return final_state.short_answer
