@@ -18,7 +18,6 @@ class ResearchState(BaseModel):
     refinement_count: int = 0
     is_satisfactory: bool = False
     messages: list = Field(default_factory=list)
-    findings: list = Field(default_factory=list)
     depth: int = 0
     max_depth: int = 1
     is_sufficient: bool = False
@@ -44,7 +43,7 @@ def short_answer_node(state: ResearchState) -> ResearchState:
     llm = ChatOpenAI(model="gpt-4-turbo-preview")
     response = llm.invoke([
         SystemMessage(content="You are an expert at extracting concise, accurate answers from research findings. Your role is to: 1. Analyze the research findings 2. Extract the most relevant information 3. Formulate a clear, concise answer 4. Ensure accuracy and completeness"),
-        HumanMessage(content=f"Based on these findings: {state.findings}\nExtract a concise answer to: {state.question}")
+        HumanMessage(content=f"Based on these findings: {state.messages}\nExtract a concise answer to: {state.question}")
     ])
     state.short_answer = response.content
     return state
@@ -55,8 +54,9 @@ def report_writer_node(state: ResearchState) -> ResearchState:
     llm = ChatOpenAI(model="gpt-4-turbo-preview")
     response = llm.invoke([
         SystemMessage(content="You are a report writer that creates well-structured research reports. Your role is to: 1. Organize findings into logical sections 2. Create clear and concise summaries 3. Highlight key insights and evidence 4. Maintain academic rigor and clarity 5. Analyze the reviewer's evaluation and improve the report accordingly"),
-        HumanMessage(content=f"Findings: {state.findings}.\n\n Reviewer's evaluation: {state.evaluation}")
+        HumanMessage(content=f"Findings: {state.messages}.\n\n Reviewer's evaluation: {state.evaluation}")
     ])
+    print(f"Report writer response: {response}")
     state.report = response.content
     return state
 
@@ -82,6 +82,7 @@ def llm_with_tools_node(state: ResearchState) -> ResearchState:
         state.messages.append(SystemMessage(content="You are a research agent. Use tools to answer the question deeply. Question: {state.question}"))
     response = llm.invoke(state.messages)
     state.messages.append(response)
+    print(f"LLM with tools response: {response}")
     return state
 
 def aggregate_findings_node(state: ResearchState) -> ResearchState:
@@ -90,7 +91,7 @@ def aggregate_findings_node(state: ResearchState) -> ResearchState:
     for msg in state.messages:
         if isinstance(msg, AIMessage) and hasattr(msg, 'tool_call_outputs'):
             findings.extend(msg.tool_call_outputs)
-    state.findings = findings
+    state.messages = findings
     return state
 
 def review_findings_node(state: ResearchState) -> ResearchState:
@@ -98,7 +99,7 @@ def review_findings_node(state: ResearchState) -> ResearchState:
     llm = ChatOpenAI(model="gpt-4-turbo-preview")
     review_prompt = [
         SystemMessage(content="You are a research reviewer. Review the findings for a user question and decide if more research is needed. If sufficient, reply with 'sufficient'. Otherwise, suggest follow-up queries."),
-        HumanMessage(content=f"User question: {state.question}\n\n Findings so far: {state.findings}")
+        HumanMessage(content=f"User question: {state.question}\n\n Findings so far: {state.messages}")
     ]
     response = llm.invoke(review_prompt)
     state.messages.append(response)
@@ -132,7 +133,7 @@ def route_after_research(state: ResearchState) -> str:
     return "get_short_answer" if state.answer_format == "short" else "write_report"
 
 def should_continue_refinement(state: ResearchState) -> str:
-    if state.is_satisfactory or state.refinement_count >= 3:
+    if state.is_satisfactory or state.refinement_count >= 1:
         return END
     return "write_report"
 
