@@ -17,13 +17,13 @@ class ResearchState(BaseModel):
     short_answer: str = ""
     refinement_count: int = 0
     is_satisfactory: bool = False
-
-class MessageState(BaseModel):
     messages: list = Field(default_factory=list)
     findings: list = Field(default_factory=list)
     depth: int = 0
     max_depth: int = 3
     is_sufficient: bool = False
+
+    
 
 # Node: Manager determines answer format
 def manager_node(state: ResearchState) -> ResearchState:
@@ -74,16 +74,16 @@ def report_refiner_node(state: ResearchState) -> ResearchState:
 
 # Deep research subgraph nodes
 
-def llm_with_tools_node(state: MessageState) -> MessageState:
+def llm_with_tools_node(state: ResearchState) -> ResearchState:
     print(f"LLM with tools node called")
     llm = ChatOpenAI(model="gpt-4-turbo-preview").bind_tools(RESEARCH_TOOLS)
     if not state.messages:
-        state.messages.append(SystemMessage(content="You are a research agent. Use tools to answer the question deeply."))
+        state.messages.append(SystemMessage(content="You are a research agent. Use tools to answer the question deeply. Question: {state.question}"))
     response = llm.invoke(state.messages)
     state.messages.append(response)
     return state
 
-def aggregate_findings_node(state: MessageState) -> MessageState:
+def aggregate_findings_node(state: ResearchState) -> ResearchState:
     print(f"Aggregate findings node called")
     findings = []
     for msg in state.messages:
@@ -92,7 +92,7 @@ def aggregate_findings_node(state: MessageState) -> MessageState:
     state.findings = findings
     return state
 
-def review_findings_node(state: MessageState) -> MessageState:
+def review_findings_node(state: ResearchState) -> ResearchState:
     print(f"Review findings node called")
     llm = ChatOpenAI(model="gpt-4-turbo-preview")
     review_prompt = [
@@ -110,11 +110,11 @@ def review_findings_node(state: MessageState) -> MessageState:
         state.is_sufficient = False
     return state
 
-def should_continue_or_return(state: MessageState):
+def should_continue_or_return(state: ResearchState):
     return END if state.is_sufficient else "llm_with_tools"
 
 def create_deep_research_subgraph():
-    builder = StateGraph(MessageState)
+    builder = StateGraph(ResearchState)
     builder.add_node('llm_with_tools', llm_with_tools_node)
     builder.add_node('tools', ToolNode(RESEARCH_TOOLS))
     builder.add_node('aggregate_findings', aggregate_findings_node)
