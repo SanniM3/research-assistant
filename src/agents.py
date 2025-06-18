@@ -1,200 +1,142 @@
-from typing import Dict, Any, List, Tuple, Literal
-from langchain.agents import AgentExecutor, create_openai_tools_agent
+from typing import List, Literal
 from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.tools import BaseTool
-from langgraph.graph import StateGraph, END
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.graph import StateGraph, END, START
 from pydantic import BaseModel, Field
 from .tools import RESEARCH_TOOLS
 
 # State Models
 class ResearchState(BaseModel):
     question: str
-    answer_format: Literal["short", "long"] = "short"  # Default to short format
-    findings: List[Dict[str, Any]] = Field(default_factory=list)
-    current_query: str = ""
+    answer_format: Literal["short", "long"] = "short"
+    findings: List = Field(default_factory=list)
     evaluation: str = ""
     report: str = ""
     short_answer: str = ""
     refinement_count: int = 0
     is_satisfactory: bool = False
 
-# Agent Prompts
-MANAGER_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are a research manager agent that coordinates deep research tasks.
-    Your role is to:
-    1. Analyze the user's question
-    2. Determine if a short answer or detailed report is needed
-    3. Coordinate with other agents to get the best results
-    4. Ensure the final output meets the user's needs
-    
-    Return either "short" or "long" as your answer."""),
-    ("user", "{question}")
-])
+class MessageState(BaseModel):
+    messages: list = Field(default_factory=list)
+    findings: list = Field(default_factory=list)
+    depth: int = 0
+    max_depth: int = 3
+    is_sufficient: bool = False
 
-TOOL_CALLING_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are a research agent that conducts deep research using various tools.
-    Your role is to:
-    1. Generate effective search queries
-    2. Use appropriate tools to gather information
-    3. Evaluate the quality and relevance of findings
-    4. Iterate until you have comprehensive results"""),
-    ("user", "{question}")
-])
+# Node: Manager determines answer format
+def manager_node(state: ResearchState) -> ResearchState:
+    llm = ChatOpenAI(model="gpt-4-turbo-preview")
+    response = llm.invoke([
+        SystemMessage(content="You are a research manager agent that coordinates deep research tasks. Your role is to: 1. Analyze the user's question 2. Determine if a short answer or detailed report is needed. Return either 'short' or 'long' as your answer."),
+        HumanMessage(content=state.question)
+    ])
+    state.answer_format = "long" if "long" in response["content"].lower() else "short"
+    return state
 
-SHORT_ANSWER_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are an expert at extracting concise, accurate answers from research findings.
-    Your role is to:
-    1. Analyze the research findings
-    2. Extract the most relevant information
-    3. Formulate a clear, concise answer
-    4. Ensure accuracy and completeness"""),
-    ("user", "Based on these findings: {findings}\nExtract a concise answer to: {question}")
-])
+# Node: Short answer extraction
+def short_answer_node(state: ResearchState) -> ResearchState:
+    llm = ChatOpenAI(model="gpt-4-turbo-preview")
+    response = llm.invoke([
+        SystemMessage(content="You are an expert at extracting concise, accurate answers from research findings. Your role is to: 1. Analyze the research findings 2. Extract the most relevant information 3. Formulate a clear, concise answer 4. Ensure accuracy and completeness"),
+        HumanMessage(content=f"Based on these findings: {state.findings}\nExtract a concise answer to: {state.question}")
+    ])
+    state.short_answer = response["content"]
+    return state
 
-REPORT_WRITER_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are a report writer that creates well-structured research reports.
-    Your role is to:
-    1. Organize findings into logical sections
-    2. Create clear and concise summaries
-    3. Highlight key insights and evidence
-    4. Maintain academic rigor and clarity"""),
-    ("user", "{findings}")
-])
+# Node: Report writer
+def report_writer_node(state: ResearchState) -> ResearchState:
+    llm = ChatOpenAI(model="gpt-4-turbo-preview")
+    response = llm.invoke([
+        SystemMessage(content="You are a report writer that creates well-structured research reports. Your role is to: 1. Organize findings into logical sections 2. Create clear and concise summaries 3. Highlight key insights and evidence 4. Maintain academic rigor and clarity 5. Analyze the reviewer's evaluation and improve the report accordingly"),
+        HumanMessage(content=f"Findings: {state.findings}.\n\n Reviewer's evaluation: {state.evaluation}")
+    ])
+    state.report = response["content"]
+    return state
 
-REPORT_REFINER_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are a report refiner that improves research reports.
-    Your role is to:
-    1. Critically evaluate report quality
-    2. Suggest specific improvements
-    3. Ensure clarity and coherence
-    4. Maintain academic standards"""),
-    ("user", "{report}")
-])
+# Node: Report refiner
+def report_refiner_node(state: ResearchState) -> ResearchState:
+    llm = ChatOpenAI(model="gpt-4-turbo-preview")
+    response = llm.invoke([
+        SystemMessage(content="You are a report refiner that improves research reports. Your role is to: 1. Critically evaluate report quality as it applies to the user's question 2. Suggest specific improvements 3. Ensure clarity and coherence 4. Maintain academic standards 5. If the report has reached a high quality, return 'acceptable' only, otherwise return the suggestions for improvement"),
+        HumanMessage(content=f"User's question: {state.question}\n\n Report: {state.report}")
+    ])
+    state.evaluation = response["content"]
+    state.is_satisfactory = "acceptable" in response["content"].lower()
+    state.refinement_count += 1
+    return state
 
-# Agent Classes
-class ManagerAgent:
-    def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4-turbo-preview")
-        self.agent = create_openai_tools_agent(
-            llm=self.llm,
-            prompt=MANAGER_PROMPT,
-            tools=[]
-        )
-        self.executor = AgentExecutor(agent=self.agent, tools=[])
-    
-    def determine_output_type(self, state: ResearchState) -> ResearchState:
-        """Determine if a short answer or detailed report is needed"""
-        response = self.executor.invoke({"question": state.question})
-        state.answer_format = "long" if "long" in response["output"].lower() else "short"
-        return state
+# Deep research subgraph nodes
 
-class ToolCallingAgent:
-    def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4-turbo-preview")
-        self.agent = create_openai_tools_agent(
-            llm=self.llm,
-            prompt=TOOL_CALLING_PROMPT,
-            tools=RESEARCH_TOOLS
-        )
-        self.executor = AgentExecutor(agent=self.agent, tools=RESEARCH_TOOLS)
-    
-    def research(self, state: ResearchState) -> ResearchState:
-        """Conduct research and return findings"""
-        response = self.executor.invoke({"question": state.question})
-        state.findings = response["findings"]
-        return state
+def llm_with_tools_node(state: MessageState) -> MessageState:
+    llm = ChatOpenAI(model="gpt-4-turbo-preview").bind_tools(RESEARCH_TOOLS)
+    if not state.messages:
+        state.messages.append(SystemMessage(content="You are a research agent. Use tools to answer the question deeply."))
+    response = llm.invoke(state.messages)
+    state.messages.append(response)
+    return state
 
-class ShortAnswerAgent:
-    def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4-turbo-preview")
-        self.agent = create_openai_tools_agent(
-            llm=self.llm,
-            prompt=SHORT_ANSWER_PROMPT,
-            tools=[]
-        )
-        self.executor = AgentExecutor(agent=self.agent, tools=[])
-    
-    def extract_answer(self, state: ResearchState) -> ResearchState:
-        """Extract a concise answer from findings"""
-        response = self.executor.invoke({
-            "findings": state.findings,
-            "question": state.question
-        })
-        state.short_answer = response["output"]
-        return state
+def aggregate_findings_node(state: MessageState) -> MessageState:
+    findings = []
+    for msg in state.messages:
+        if isinstance(msg, AIMessage) and hasattr(msg, 'tool_call_outputs'):
+            findings.extend(msg.tool_call_outputs)
+    state.findings = findings
+    return state
 
-class ReportWriterAgent:
-    def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4-turbo-preview")
-        self.agent = create_openai_tools_agent(
-            llm=self.llm,
-            prompt=REPORT_WRITER_PROMPT,
-            tools=[]
-        )
-        self.executor = AgentExecutor(agent=self.agent, tools=[])
-    
-    def write_report(self, state: ResearchState) -> ResearchState:
-        """Create a structured report from findings"""
-        response = self.executor.invoke({"findings": state.findings})
-        state.report = response["output"]
-        return state
+def review_findings_node(state: MessageState) -> MessageState:
+    llm = ChatOpenAI(model="gpt-4-turbo-preview")
+    review_prompt = [
+        SystemMessage(content="You are a research reviewer. Review the findings for a user question and decide if more research is needed. If sufficient, reply with 'sufficient'. Otherwise, suggest follow-up queries."),
+        HumanMessage(content=f"User question: {state.question}\n\n Findings so far: {state.findings}")
+    ]
+    response = llm.invoke(review_prompt)
+    state.messages.append(response)
+    state.depth += 1
+    if hasattr(response, "content") and "sufficient" in str(response.content).lower():
+        state.is_sufficient = True
+    elif state.depth >= state.max_depth:
+        state.is_sufficient = True
+    else:
+        state.is_sufficient = False
+    return state
 
-class ReportRefinerAgent:
-    def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4-turbo-preview")
-        self.agent = create_openai_tools_agent(
-            llm=self.llm,
-            prompt=REPORT_REFINER_PROMPT,
-            tools=[]
-        )
-        self.executor = AgentExecutor(agent=self.agent, tools=[])
-    
-    def refine_report(self, state: ResearchState) -> ResearchState:
-        """Refine the report and determine if it's satisfactory"""
-        response = self.executor.invoke({"report": state.report})
-        state.report = response["output"]
-        state.is_satisfactory = "satisfactory" in response["output"].lower()
-        state.refinement_count += 1
-        return state
+def should_continue_or_return(state: MessageState):
+    return END if state.is_sufficient else "llm_with_tools"
 
-# Graph Functions
+def create_deep_research_subgraph():
+    builder = StateGraph(MessageState)
+    builder.add_node('llm_with_tools', llm_with_tools_node)
+    builder.add_node('tools', ToolNode(RESEARCH_TOOLS))
+    builder.add_node('aggregate_findings', aggregate_findings_node)
+    builder.add_node('review_findings', review_findings_node)
+    builder.add_edge(START, 'llm_with_tools')
+    builder.add_conditional_edges('llm_with_tools', tools_condition)
+    builder.add_edge('tools', 'aggregate_findings')
+    builder.add_edge('aggregate_findings', 'review_findings')
+    builder.add_edge('review_findings', should_continue_or_return)
+    builder.add_edge('llm_with_tools', END)
+    return builder.compile()
+
 def route_after_research(state: ResearchState) -> str:
-    """Route to either short answer or report writer based on answer_format"""
     return "get_short_answer" if state.answer_format == "short" else "write_report"
 
 def should_continue_refinement(state: ResearchState) -> str:
-    """Determine if report refinement should continue"""
     if state.is_satisfactory or state.refinement_count >= 3:
         return "end"
     return "refine"
 
 def create_research_graph() -> StateGraph:
-    # Initialize agents
-    manager = ManagerAgent()
-    tool_caller = ToolCallingAgent()
-    short_answer = ShortAnswerAgent()
-    report_writer = ReportWriterAgent()
-    report_refiner = ReportRefinerAgent()
-    
-    # Create graph
     workflow = StateGraph(ResearchState)
-    
-    # Add nodes
-    workflow.add_node("manager", manager.determine_output_type)
-    workflow.add_node("research", tool_caller.research)
-    workflow.add_node("get_short_answer", short_answer.extract_answer)
-    workflow.add_node("write_report", report_writer.write_report)
-    workflow.add_node("refine_report", report_refiner.refine_report)
-    
-    # Add edges
+    workflow.add_node("manager", manager_node)
+    workflow.add_node("research", create_deep_research_subgraph)
+    workflow.add_node("get_short_answer", short_answer_node)
+    workflow.add_node("write_report", report_writer_node)
+    workflow.add_node("refine_report", report_refiner_node)
     workflow.add_edge("manager", "research")
     workflow.add_edge("research", route_after_research)
     workflow.add_edge("get_short_answer", "end")
     workflow.add_edge("write_report", "refine_report")
     workflow.add_edge("refine_report", should_continue_refinement)
-    
-    # Set entry point
     workflow.set_entry_point("manager")
-    
     return workflow.compile() 

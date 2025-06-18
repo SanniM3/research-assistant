@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from .agents import create_research_graph, ResearchState
+from src.agents import create_research_graph, ResearchState
 
 load_dotenv()
 
@@ -32,8 +32,8 @@ def main():
     # Example questions
     questions = [
         "What is the current state of quantum computing?",  # Likely to get a long report
-        "What is the capital of France?",  # Likely to get a short answer
-        "How does climate change affect coral reefs?"  # Likely to get a long report
+        # "What is the capital of France?",  # Likely to get a short answer
+        # "How does climate change affect coral reefs?"  # Likely to get a long report
     ]
     
     for question in questions:
@@ -44,4 +44,4 @@ def main():
         print("\n" + "="*80)
 
 if __name__ == "__main__":
-    main() 
+    main()
