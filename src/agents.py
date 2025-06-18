@@ -2,6 +2,7 @@ from typing import List, Literal
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, END, START
 from pydantic import BaseModel, Field
 from .tools import RESEARCH_TOOLS
@@ -124,7 +125,7 @@ def create_deep_research_subgraph():
     builder.add_edge('aggregate_findings', 'review_findings')
     builder.add_conditional_edges('review_findings', should_continue_or_return)
     # builder.add_edge('llm_with_tools', END)
-    return builder.compile()
+    return builder.compile(checkpointer=MemorySaver())
 
 def route_after_research(state: ResearchState) -> str:
     return "get_short_answer" if state.answer_format == "short" else "write_report"
@@ -147,4 +148,4 @@ def create_research_graph() -> StateGraph:
     workflow.add_edge("get_short_answer", END)
     workflow.add_edge("write_report", "refine_report")
     workflow.add_conditional_edges("refine_report", should_continue_refinement)
-    return workflow.compile() 
+    return workflow.compile(checkpointer=MemorySaver()) 
