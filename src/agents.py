@@ -26,6 +26,7 @@ class MessageState(BaseModel):
 
 # Node: Manager determines answer format
 def manager_node(state: ResearchState) -> ResearchState:
+    print(f"Manager node called")
     llm = ChatOpenAI(model="gpt-4-turbo-preview")
     response = llm.invoke([
         SystemMessage(content="You are a research manager agent that coordinates deep research tasks. Your role is to: 1. Analyze the user's question 2. Determine if a short answer or detailed report is needed. Return either 'short' or 'long' as your answer."),
@@ -36,6 +37,7 @@ def manager_node(state: ResearchState) -> ResearchState:
 
 # Node: Short answer extraction
 def short_answer_node(state: ResearchState) -> ResearchState:
+    print(f"Short answer node called")
     llm = ChatOpenAI(model="gpt-4-turbo-preview")
     response = llm.invoke([
         SystemMessage(content="You are an expert at extracting concise, accurate answers from research findings. Your role is to: 1. Analyze the research findings 2. Extract the most relevant information 3. Formulate a clear, concise answer 4. Ensure accuracy and completeness"),
@@ -46,6 +48,7 @@ def short_answer_node(state: ResearchState) -> ResearchState:
 
 # Node: Report writer
 def report_writer_node(state: ResearchState) -> ResearchState:
+    print(f"Report writer node called")
     llm = ChatOpenAI(model="gpt-4-turbo-preview")
     response = llm.invoke([
         SystemMessage(content="You are a report writer that creates well-structured research reports. Your role is to: 1. Organize findings into logical sections 2. Create clear and concise summaries 3. Highlight key insights and evidence 4. Maintain academic rigor and clarity 5. Analyze the reviewer's evaluation and improve the report accordingly"),
@@ -56,6 +59,7 @@ def report_writer_node(state: ResearchState) -> ResearchState:
 
 # Node: Report refiner
 def report_refiner_node(state: ResearchState) -> ResearchState:
+    print(f"Report refiner node called")
     llm = ChatOpenAI(model="gpt-4-turbo-preview")
     response = llm.invoke([
         SystemMessage(content="You are a report refiner that improves research reports. Your role is to: 1. Critically evaluate report quality as it applies to the user's question 2. Suggest specific improvements 3. Ensure clarity and coherence 4. Maintain academic standards 5. If the report has reached a high quality, return 'acceptable' only, otherwise return the suggestions for improvement"),
@@ -69,6 +73,7 @@ def report_refiner_node(state: ResearchState) -> ResearchState:
 # Deep research subgraph nodes
 
 def llm_with_tools_node(state: MessageState) -> MessageState:
+    print(f"LLM with tools node called")
     llm = ChatOpenAI(model="gpt-4-turbo-preview").bind_tools(RESEARCH_TOOLS)
     if not state.messages:
         state.messages.append(SystemMessage(content="You are a research agent. Use tools to answer the question deeply."))
@@ -77,6 +82,7 @@ def llm_with_tools_node(state: MessageState) -> MessageState:
     return state
 
 def aggregate_findings_node(state: MessageState) -> MessageState:
+    print(f"Aggregate findings node called")
     findings = []
     for msg in state.messages:
         if isinstance(msg, AIMessage) and hasattr(msg, 'tool_call_outputs'):
@@ -85,6 +91,7 @@ def aggregate_findings_node(state: MessageState) -> MessageState:
     return state
 
 def review_findings_node(state: MessageState) -> MessageState:
+    print(f"Review findings node called")
     llm = ChatOpenAI(model="gpt-4-turbo-preview")
     review_prompt = [
         SystemMessage(content="You are a research reviewer. Review the findings for a user question and decide if more research is needed. If sufficient, reply with 'sufficient'. Otherwise, suggest follow-up queries."),
@@ -115,7 +122,7 @@ def create_deep_research_subgraph():
     builder.add_edge('tools', 'aggregate_findings')
     builder.add_edge('aggregate_findings', 'review_findings')
     builder.add_edge('review_findings', should_continue_or_return)
-    builder.add_edge('llm_with_tools', END)
+    # builder.add_edge('llm_with_tools', END)
     return builder.compile()
 
 def route_after_research(state: ResearchState) -> str:
