@@ -18,7 +18,7 @@ class ResearchState(BaseModel):
     short_answer: str = ""
     refinement_count: int = 0
     is_satisfactory: bool = False
-    messages: Annotated[list[AnyMessage], add_messages]
+    messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list)
     depth: int = 0
     max_depth: int = 1
     is_sufficient: bool = False
