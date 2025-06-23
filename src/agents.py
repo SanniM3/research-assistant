@@ -58,16 +58,17 @@ def report_writer_node(state: ResearchState) -> ResearchState:
         SystemMessage(content="You are a report writer that creates well-structured research reports. Your role is to: 1. Organize findings into logical sections 2. Create clear and concise summaries 3. Highlight key insights and evidence 4. Maintain academic rigor and clarity 5. Analyze the reviewer's evaluation and improve the report accordingly"),
         HumanMessage(content=f"Findings: {state.messages}.\n\n Reviewer's evaluation: {state.evaluation}")
     ])
-    print(f"Report writer response: {response}")
+    print(f"Report writer response: {response.content}")
     state.report = response.content
     return state
 
 # Node: Report refiner
 def report_refiner_node(state: ResearchState) -> ResearchState:
     print(f"Report refiner node called")
+    # print(f"Current report before refinement iteration {state.refinement_count}: {state.report}")
     llm = ChatOpenAI(model="gpt-4o")
     response = llm.invoke([
-        SystemMessage(content="You are a report refiner that improves research reports. Your role is to: 1. Critically evaluate report quality as it applies to the user's question 2. Suggest specific improvements 3. Ensure clarity and coherence 4. Maintain academic standards 5. If the report has reached a high quality, return 'acceptable' only, otherwise return the suggestions for improvement"),
+        SystemMessage(content="You are a report refiner that improves research reports. Your role is to: 1. Critically evaluate report quality as it applies to the user's question 2. Suggest specific improvements (if any) 3. Ensure clarity and coherence 4. Maintain academic standards 5. If the report has reached a high quality, return 'acceptable' only, otherwise return the suggestions for improvement"),
         HumanMessage(content=f"User's question: {state.question}\n\n Report: {state.report}")
     ])
     state.evaluation = response.content
@@ -142,6 +143,7 @@ def route_after_research(state: ResearchState) -> str:
     return "get_short_answer" if state.answer_format == "short" else "write_report"
 
 def should_continue_refinement(state: ResearchState) -> str:
+    # print(f'Should continue refinement called. Current report: {state.report}')
     if state.is_satisfactory or state.refinement_count >= 1:
         return END
     return "write_report"
