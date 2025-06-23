@@ -96,11 +96,11 @@ def llm_with_tools_node(state: ResearchState) -> ResearchState:
 def aggregate_findings_node(state: ResearchState) -> ResearchState:
     print("Aggregate findings node called")
     print(f'state messages before findings aggregation: {state.messages}')
-    findings = []
-    for msg in state.messages:
-        if isinstance(msg, AIMessage) and hasattr(msg, 'tool_call_outputs'):
-            findings.extend(msg.tool_call_outputs)
-    state.messages = findings
+    # findings = []
+    # for msg in state.messages:
+    #     if isinstance(msg, AIMessage) and hasattr(msg, 'tool_call_outputs'):
+    #         findings.extend(msg.tool_call_outputs)
+    state.findings = state.messages
     return state
 
 def review_findings_node(state: ResearchState) -> ResearchState:
