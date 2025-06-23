@@ -20,15 +20,15 @@ class ResearchAssistant:
         # Run the research workflow
         final_state = self.graph.invoke(state, config=self.config)
 
-        for m in final_state['messages']:
-            m.pretty_print()
-            
+        # for m in final_state['messages']:
+        #     m.pretty_print()
+
         print(f"Final state: {final_state}")    
         # Return appropriate output based on answer format
         if final_state['answer_format'] == "short":
-            return final_state.short_answer
+            return final_state['short_answer']
         else:
-            return final_state.report
+            return final_state['report']
 
 def main():
     assistant = ResearchAssistant()
