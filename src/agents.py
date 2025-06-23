@@ -1,6 +1,7 @@
-from typing import List, Literal
+from typing import List, Literal, Annotated
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, AnyMessage
+from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, END, START
@@ -17,11 +18,12 @@ class ResearchState(BaseModel):
     short_answer: str = ""
     refinement_count: int = 0
     is_satisfactory: bool = False
-    messages: list = Field(default_factory=list)
+    messages: Annotated[list[AnyMessage], add_messages]
     depth: int = 0
     max_depth: int = 1
     is_sufficient: bool = False
 
+  
     
 
 # Node: Manager determines answer format
@@ -92,8 +94,8 @@ def llm_with_tools_node(state: ResearchState) -> ResearchState:
     return state
 
 def aggregate_findings_node(state: ResearchState) -> ResearchState:
-    print(f"Aggregate findings node called")
-    print(f'state messages before findings aggregation')
+    print("Aggregate findings node called")
+    print(f'state messages before findings aggregation: {state.messages}')
     findings = []
     for msg in state.messages:
         if isinstance(msg, AIMessage) and hasattr(msg, 'tool_call_outputs'):
