@@ -58,6 +58,7 @@ research-assistant/
 │   ├── main.py          # Main application entry point
 │   ├── agents.py        # Agent definitions and graph
 │   └── tools.py         # Tools implementation
+├── run.py               
 ├── requirements.txt     # Project dependencies
 ├── README.md           # Project documentation
 └── .env               # Environment variables (create this)
