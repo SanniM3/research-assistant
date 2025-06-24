@@ -125,6 +125,7 @@ def review_findings_node(state: ResearchState) -> ResearchState:
         state.is_sufficient = True
     else:
         state.is_sufficient = False
+        state.findings.extend(response.content) 
     return state
 
 def should_continue_or_return(state: ResearchState):
