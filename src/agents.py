@@ -96,7 +96,7 @@ def aggregate_findings_node(state: ResearchState) -> ResearchState:
 
 def review_findings_node(state: ResearchState) -> ResearchState:
     print(f"Review findings node called")
-    llm = ChatOpenAI(model="gpt-4-turbo-preview")
+    llm = ChatOpenAI(model="gpt-4o")
     review_prompt = [
         SystemMessage(content="You are a research reviewer. Review the findings for a user question and decide if more research is needed. If sufficient, reply with 'sufficient'. Otherwise, suggest follow-up queries."),
         HumanMessage(content=f"User question: {state.question}\n\n Findings so far: {state.messages}")
@@ -104,7 +104,7 @@ def review_findings_node(state: ResearchState) -> ResearchState:
     response = llm.invoke(review_prompt)
     state.messages.append(response)
     state.depth += 1
-    if hasattr(response, "content") and "sufficient" in str(response.content).lower():
+    if hasattr(response, "content") and str(response.content).lower()=="sufficient":
         state.is_sufficient = True
     elif state.depth >= state.max_depth:
         state.is_sufficient = True
