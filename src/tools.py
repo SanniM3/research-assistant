@@ -61,6 +61,7 @@ def arxiv_search_tool(query: str, max_results: int = 5) -> list:
             "url": result.entry_id,
             "published": result.published.isoformat()
         })
+    # print(f'Arxiv search returned: {results}')
     return results
 
 # class PubMedTool(BaseTool):
@@ -109,14 +110,14 @@ def tavily_search_tool(search_query: str):
     print(f"Tavily search tool called with query: {search_query}")
     tavily_search = TavilySearchResults(max_results=5)
     # Search
-    search_docs = tavily_search.invoke(search_query.search_query)
+    search_docs = tavily_search.invoke(search_query)
     formatted_search_docs = "\n\n---\n\n".join(
         [
             f'<Document href="{doc["url"]}"/>\n{doc["content"]}\n</Document>'
             for doc in search_docs
         ]
     )
-
+    # print(f'Tavily search returned: {formatted_search_docs}')
     return formatted_search_docs
 
 # class VisualQATool(BaseTool):

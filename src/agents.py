@@ -1,6 +1,7 @@
-from typing import List, Literal
+from typing import List, Literal, Annotated
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, AnyMessage
+from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, END, START
@@ -17,17 +18,18 @@ class ResearchState(BaseModel):
     short_answer: str = ""
     refinement_count: int = 0
     is_satisfactory: bool = False
-    messages: list = Field(default_factory=list)
+    messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list)
     depth: int = 0
     max_depth: int = 1
     is_sufficient: bool = False
 
+  
     
 
 # Node: Manager determines answer format
 def manager_node(state: ResearchState) -> ResearchState:
     print(f"Manager node called")
-    llm = ChatOpenAI(model="gpt-4-turbo-preview")
+    llm = ChatOpenAI(model="gpt-4o")
     response = llm.invoke([
         SystemMessage(content="You are a research manager agent that coordinates deep research tasks. Your role is to: 1. Analyze the user's question 2. Determine if a short answer or detailed report is needed. Return either 'short' or 'long' as your answer."),
         HumanMessage(content=state.question)
@@ -40,7 +42,7 @@ def manager_node(state: ResearchState) -> ResearchState:
 # Node: Short answer extraction
 def short_answer_node(state: ResearchState) -> ResearchState:
     print(f"Short answer node called")
-    llm = ChatOpenAI(model="gpt-4-turbo-preview")
+    llm = ChatOpenAI(model="gpt-4o")
     response = llm.invoke([
         SystemMessage(content="You are an expert at extracting concise, accurate answers from research findings. Your role is to: 1. Analyze the research findings 2. Extract the most relevant information 3. Formulate a clear, concise answer 4. Ensure accuracy and completeness"),
         HumanMessage(content=f"Based on these findings: {state.messages}\nExtract a concise answer to: {state.question}")
@@ -51,21 +53,22 @@ def short_answer_node(state: ResearchState) -> ResearchState:
 # Node: Report writer
 def report_writer_node(state: ResearchState) -> ResearchState:
     print(f"Report writer node called")
-    llm = ChatOpenAI(model="gpt-4-turbo-preview")
+    llm = ChatOpenAI(model="gpt-4o")
     response = llm.invoke([
         SystemMessage(content="You are a report writer that creates well-structured research reports. Your role is to: 1. Organize findings into logical sections 2. Create clear and concise summaries 3. Highlight key insights and evidence 4. Maintain academic rigor and clarity 5. Analyze the reviewer's evaluation and improve the report accordingly"),
         HumanMessage(content=f"Findings: {state.messages}.\n\n Reviewer's evaluation: {state.evaluation}")
     ])
-    print(f"Report writer response: {response}")
+    print(f"Report writer response: {response.content}")
     state.report = response.content
     return state
 
 # Node: Report refiner
 def report_refiner_node(state: ResearchState) -> ResearchState:
     print(f"Report refiner node called")
-    llm = ChatOpenAI(model="gpt-4-turbo-preview")
+    # print(f"Current report before refinement iteration {state.refinement_count}: {state.report}")
+    llm = ChatOpenAI(model="gpt-4o")
     response = llm.invoke([
-        SystemMessage(content="You are a report refiner that improves research reports. Your role is to: 1. Critically evaluate report quality as it applies to the user's question 2. Suggest specific improvements 3. Ensure clarity and coherence 4. Maintain academic standards 5. If the report has reached a high quality, return 'acceptable' only, otherwise return the suggestions for improvement"),
+        SystemMessage(content="You are a report refiner that improves research reports. Your role is to: 1. Critically evaluate report quality as it applies to the user's question 2. Suggest specific improvements (if any) 3. Ensure clarity and coherence 4. Maintain academic standards 5. If the report has reached a high quality, return 'acceptable' only, otherwise return the suggestions for improvement"),
         HumanMessage(content=f"User's question: {state.question}\n\n Report: {state.report}")
     ])
     state.evaluation = response.content
@@ -77,21 +80,28 @@ def report_refiner_node(state: ResearchState) -> ResearchState:
 
 def llm_with_tools_node(state: ResearchState) -> ResearchState:
     print(f"LLM with tools node called")
-    llm = ChatOpenAI(model="gpt-4-turbo-preview").bind_tools(RESEARCH_TOOLS)
+    print(f'llm_with_tools received state: {state}')
+    llm = ChatOpenAI(model="gpt-4o").bind_tools(RESEARCH_TOOLS)
+    print(f"state's messages before invoking search: {state.messages}")
     if not state.messages:
-        state.messages.append(SystemMessage(content="You are a research agent. Use tools to answer the question deeply. Question: {state.question}"))
+        state.messages.extend([
+            SystemMessage(content=f"You are a research agent. Use the tools to answer the question. For example, if invoking a search tool, generate appropriate search queries for the search tool."),
+            HumanMessage(content=f"Question: {state.question}")
+            ])
     response = llm.invoke(state.messages)
     state.messages.append(response)
+    print(f"state's messages after invoking search: {state.messages}")
     print(f"LLM with tools response: {response}")
     return state
 
 def aggregate_findings_node(state: ResearchState) -> ResearchState:
-    print(f"Aggregate findings node called")
-    findings = []
-    for msg in state.messages:
-        if isinstance(msg, AIMessage) and hasattr(msg, 'tool_call_outputs'):
-            findings.extend(msg.tool_call_outputs)
-    state.messages = findings
+    print("Aggregate findings node called")
+    print(f'state messages before findings aggregation: {state.messages}')
+    # findings = []
+    # for msg in state.messages:
+    #     if isinstance(msg, AIMessage) and hasattr(msg, 'tool_call_outputs'):
+    #         findings.extend(msg.tool_call_outputs)
+    state.findings = state.messages
     return state
 
 def review_findings_node(state: ResearchState) -> ResearchState:
@@ -133,6 +143,7 @@ def route_after_research(state: ResearchState) -> str:
     return "get_short_answer" if state.answer_format == "short" else "write_report"
 
 def should_continue_refinement(state: ResearchState) -> str:
+    # print(f'Should continue refinement called. Current report: {state.report}')
     if state.is_satisfactory or state.refinement_count >= 1:
         return END
     return "write_report"

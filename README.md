@@ -45,15 +45,8 @@ ENTREZ_EMAIL=your_email@example.com
 
 ## Usage
 
-```python
-from src.main import ResearchAssistant
-
-# Initialize the assistant
-assistant = ResearchAssistant()
-
-# Conduct research
-result = assistant.research("What is the current state of quantum computing?")
-print(result)
+```bash
+python run.py
 ```
 
 ## Project Structure
@@ -64,7 +57,8 @@ research-assistant/
 │   ├── __init__.py
 │   ├── main.py          # Main application entry point
 │   ├── agents.py        # Agent definitions and graph
-│   └── tools.py         # Research tools implementation
+│   └── tools.py         # Tools implementation
+├── run.py               
 ├── requirements.txt     # Project dependencies
 ├── README.md           # Project documentation
 └── .env               # Environment variables (create this)
@@ -96,13 +90,6 @@ research-assistant/
 - Ensures clarity and coherence
 - Maintains quality standards
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
 
 ## License
 
