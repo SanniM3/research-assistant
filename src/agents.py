@@ -20,7 +20,7 @@ class ResearchState(BaseModel):
     is_satisfactory: bool = False
     messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list)
     depth: int = 0
-    max_depth: int = 1
+    max_depth: int = 3
     is_sufficient: bool = False
 
   
