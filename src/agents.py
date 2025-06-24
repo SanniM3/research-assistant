@@ -88,7 +88,12 @@ def llm_with_tools_node(state: ResearchState) -> ResearchState:
             SystemMessage(content=f"You are a research agent. Use the tools to answer the question. For example, if invoking a search tool, generate appropriate search queries for the search tool."),
             HumanMessage(content=f"Question: {state.question}")
             ])
-    response = llm.invoke(state.messages)
+    else:
+        state.messages.extend([
+            SystemMessage(content=f"You are a research agent. You are provided with the initial findings from researching about a particular user query. You are also provided with a review of those findings and additional follow-up queries to fully answer the initial user question. Use the tools to answer the follow up queries as it applies to the original user query. For example, if invoking a search tool, generate appropriate search queries for the search tool."),
+            HumanMessage(content=f"Initial Question: {state.question}\n\n Previous findings and review of those findings: {state.findings}")
+            ])
+    response = llm.invoke(state.messages[-2:]) #only invoke with the last two messages (which would be the systenmessage and attached context)
     state.messages.append(response)
     print(f"state's messages after invoking search: {state.messages}")
     print(f"LLM with tools response: {response}")
