@@ -108,13 +108,13 @@ def review_findings_node(state: ResearchState) -> ResearchState:
     print(f"Review findings node called")
     llm = ChatOpenAI(model="gpt-4o")
     review_prompt = [
-        SystemMessage(content="You are a research reviewer. Review the findings for a user question and decide if more research is needed. If sufficient, reply with 'sufficient'. Otherwise, suggest follow-up queries."),
-        HumanMessage(content=f"User question: {state.question}\n\n Findings so far: {state.messages}")
+        SystemMessage(content="You are a research reviewer. Review the findings for a user question and decide if more research is needed. If none is needed, reply with 'no additional research needed'. Otherwise, suggest follow-up queries."),
+        HumanMessage(content=f"User question: {state.question}\n\n Previous queries and findings so far: {state.messages}")
     ]
     response = llm.invoke(review_prompt)
     state.messages.append(response)
     state.depth += 1
-    if hasattr(response, "content") and str(response.content).lower()=="sufficient":
+    if hasattr(response, "content") and str(response.content).lower()=="no additional research needed":
         state.is_sufficient = True
     elif state.depth >= state.max_depth:
         state.is_sufficient = True
