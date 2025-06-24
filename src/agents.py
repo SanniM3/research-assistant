@@ -1,6 +1,6 @@
 from typing import List, Literal, Annotated
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, AnyMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, AnyMessage, ToolMessage
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
@@ -102,11 +102,11 @@ def llm_with_tools_node(state: ResearchState) -> ResearchState:
 def aggregate_findings_node(state: ResearchState) -> ResearchState:
     print("Aggregate findings node called")
     print(f'state messages before findings aggregation: {state.messages}')
-    # findings = []
-    # for msg in state.messages:
-    #     if isinstance(msg, AIMessage) and hasattr(msg, 'tool_call_outputs'):
-    #         findings.extend(msg.tool_call_outputs)
-    state.findings = state.messages
+    findings = []
+    for msg in state.messages:
+        if (isinstance(msg, ToolMessage)):
+            findings.extend(msg)
+    state.findings = findings
     return state
 
 def review_findings_node(state: ResearchState) -> ResearchState:
