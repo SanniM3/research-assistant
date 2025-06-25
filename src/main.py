@@ -32,8 +32,8 @@ class ResearchAssistant:
 
 def main():
     assistant = ResearchAssistant()
-    questions = [
-        "What is the current state of quantum computing?",  # Likely to get a long report
+    questions = ["The state of multilingual reasoning in LLMs",
+        # "What is the current state of quantum computing?",  # Likely to get a long report
         # "What is the capital of France?",  # Likely to get a short answer
         # "How does climate change affect coral reefs?"  # Likely to get a long report
     ]
@@ -41,8 +41,12 @@ def main():
     for question in questions:
         print(f"\nResearching: {question}")
         result = assistant.research(question)
-        print("\nResult:")
-        print(result)
+        #write result to file
+        # print("\nResult:")
+        with open('report.txt', 'w', encoding='utf-8') as f:
+            f.write(result)
+
+        # print(result)
         print("\n" + "="*80)
 
 if __name__ == "__main__":
