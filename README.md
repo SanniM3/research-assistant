@@ -26,7 +26,7 @@ A multi-agent system built with LangGraph for conducting deep research across va
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/research-assistant.git
+git clone https://github.com/SanniM3/research-assistant.git
 cd research-assistant
 ```
 
@@ -63,32 +63,6 @@ research-assistant/
 ├── README.md           # Project documentation
 └── .env               # Environment variables (create this)
 ```
-
-## Agent Roles
-
-### Manager Agent
-- Receives user questions
-- Determines output type (single answer vs. report)
-- Coordinates with other agents
-- Ensures quality of final output
-
-### ToolCallingAgent
-- Conducts deep research using various tools
-- Generates and refines search queries
-- Evaluates research quality
-- Returns consolidated findings
-
-### ReportWriterAgent
-- Creates structured reports from findings
-- Organizes content logically
-- Highlights key insights
-- Maintains academic rigor
-
-### ReportRefinerAgent
-- Critically evaluates reports
-- Suggests improvements
-- Ensures clarity and coherence
-- Maintains quality standards
 
 ## To-do
 1. Manager should understand input and request clarification/limit scope for user (add human interrupt node here)
