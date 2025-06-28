@@ -90,6 +90,12 @@ research-assistant/
 - Ensures clarity and coherence
 - Maintains quality standards
 
+## To-do
+1. Manager should understand input and request clarification/limit scope for user (add human interrupt node here)
+2. Manager should combine question and human feedback to define subquestions that need to be answered.
+3. Generate and applicable search query. Then iterate over results (giving `process logs` to the user) and 
+4. Then at each aggregate findings node, verify that all initial subquestions have been answered and use then to generate a summary relative to the initial question.
+5. The review findings looks for missing answers to initial subquestions, it also looks for follow up questions based on the findings. If there are none, return `research completed`
 
 ## License
 
