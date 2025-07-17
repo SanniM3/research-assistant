@@ -70,7 +70,7 @@ research-assistant/
 3. Generate and applicable search query. Then iterate over results (giving `process logs` to the user) and 
 4. Then at each aggregate findings node, verify that all initial subquestions have been answered and use then to generate a summary relative to the initial question.
 5. The review findings looks for missing answers to initial subquestions, it also looks for follow up questions based on the findings. If there are none, return `research completed`
-6. [Maybe start with this] - While reading each paper, add the paper to a knowledge base, (I can still do summarisation to find out research gaps or additional searches), but during report writing, actual details are cited from the proper knowledge base to avoid hallucination.
+6. [Maybe start with this] - While reading each paper, add the paper to a knowledge base, (I can still do summarisation to find out research gaps or additional searches), but during report writing, actual details are cited from the proper knowledge base to avoid hallucination. Alternatively, to avoid keeping track of too much context, while reading each paper and search result, add them to a knowledge base, then get use that to answer the user query. Then identify gaps from this answer to create another search. Then repeat. That way, we may not need to keep track of previous searches and papers (maybe?)
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
