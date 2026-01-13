@@ -1,11 +1,18 @@
 """
-Multi-Agent Research Assistant
+Multilingual Multi-Agent Academic Research Assistant
 
-A multi-agent system built with LangGraph for conducting deep research
-across various domains using a hierarchical manager-worker architecture.
+A LangGraph-based system that mimics the academic literature review process
+and produces survey-style academic reports with strict grounding and traceable citations.
 """
+from .graph.workflow import ResearchWorkflow, create_research_workflow
+from .models.state import ResearchState
+from .config.settings import Settings, get_settings
 
-from .main import ResearchAssistant
-
-__version__ = "0.1.0"
-__all__ = ["ResearchAssistant"] 
+__version__ = "2.0.0"
+__all__ = [
+    "ResearchWorkflow",
+    "create_research_workflow", 
+    "ResearchState",
+    "Settings",
+    "get_settings",
+]
