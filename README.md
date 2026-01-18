@@ -14,7 +14,9 @@ A LangGraph-powered system that automates academic literature reviews and produc
 
 ## Workflow Architecture
 
-![Research Assistant Workflow](research_graph.png)
+<p align="center">
+  <img src="research_graph.png" alt="Research Assistant Workflow" width="50%">
+</p>
 
 ## Installation
 
