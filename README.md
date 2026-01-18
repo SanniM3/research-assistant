@@ -2,6 +2,8 @@
 
 A LangGraph-powered system that automates academic literature reviews and produces survey-style papers with strict grounding and traceable citations.
 
+
+
 ## Features
 
 - **Multi-agent architecture**: 13 specialized agents (planner, retriever, extractor, synthesizer, reviewer, etc.)
@@ -9,6 +11,10 @@ A LangGraph-powered system that automates academic literature reviews and produc
 - **Grounded synthesis**: Every claim traces back to source evidence
 - **Iterative refinement**: Gap scoring and ARR-style review drive quality improvements
 - **Citation management**: Automatic BibTeX generation and citation normalization
+
+## Workflow Architecture
+
+![Research Assistant Workflow](research_graph.png)
 
 ## Installation
 
@@ -39,6 +45,18 @@ MAX_ITERATIONS=5
 ```
 
 ## Usage
+
+### Web Interface (Streamlit)
+
+```bash
+streamlit run app.py
+```
+
+This opens a web UI where you can:
+- Enter research topics
+- Configure settings
+- Watch progress in real-time
+- Download the generated report
 
 ### Command Line
 
