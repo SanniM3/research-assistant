@@ -117,14 +117,24 @@ def compile_final_report(state: ResearchState) -> str:
         parts.append(content)
         parts.append("")
     
-    # References
+    # References (IEEE style)
     parts.append("## References")
     parts.append("")
-    parts.append("```bibtex")
-    for citekey, bibtex in state.bib_entries.items():
-        parts.append(bibtex)
-        parts.append("")
-    parts.append("```")
+    
+    # Check if we have the new IEEE-style references
+    if "_references_text" in state.bib_entries:
+        parts.append(state.bib_entries["_references_text"])
+    else:
+        # Fallback to basic reference list from papers
+        for i, (paper_id, paper) in enumerate(state.papers_ingested.items(), 1):
+            authors = ", ".join(paper.authors[:3]) if paper.authors else "Unknown"
+            if len(paper.authors) > 3:
+                authors += " et al."
+            title = paper.title or "Untitled"
+            year = paper.year or "n.d."
+            venue = f"*{paper.venue}*" if paper.venue else f"*arXiv:{paper.arxiv_id}*" if paper.arxiv_id else ""
+            parts.append(f"[{i}] {authors}, \"{title},\" {venue} {year}.")
+            parts.append("")
     
     # Appendix: Research Statistics
     parts.append("")

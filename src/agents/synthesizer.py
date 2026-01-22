@@ -135,10 +135,23 @@ def write_section(section: OutlineSection, claims: List[Claim],
         for c in chunks[:15]
     ])
     
+    # Build a paper reference list for the LLM
+    paper_refs = []
+    for claim in claims[:30]:
+        for evidence in claim.evidence:
+            paper_id = claim.paper_id
+            if paper_id not in [p[0] for p in paper_refs]:
+                paper_refs.append((paper_id, evidence.chunk_id))
+    
+    paper_list = "\n".join([f"- Paper ID: {pid} (cite as: [@{pid}])" for pid, _ in paper_refs[:20]])
+    
     prompt = f"""Write the "{section.title}" section for an academic survey on: {topic}
 
 SECTION DESCRIPTION: {section.description}
 REQUIRED ELEMENTS: {', '.join(section.required_elements)}
+
+AVAILABLE SOURCES TO CITE:
+{paper_list if paper_list else "No sources available yet."}
 
 CLAIMS FROM LITERATURE (use these as your primary source):
 {claims_text if claims_text else "No specific claims available - write based on general knowledge but note limitations."}
@@ -147,19 +160,25 @@ SUPPORTING EVIDENCE (for additional context and wording):
 {chunks_text if chunks_text else "No additional context available."}
 
 WRITING GUIDELINES:
-1. Write in academic survey style
-2. Every factual statement must cite evidence using format: [@paper_id:chunk_id]
-3. If a claim has evidence, include the citation
-4. If making a claim without evidence, explicitly note it as "observed trend" or "commonly held view"
-5. Address contradictions by presenting both sides
-6. Be comprehensive but concise
-7. Use appropriate structure (subsections if needed)
-8. For comparison claims, consider using tables or structured comparisons
+1. Write in academic survey style with proper in-line citations
+2. IMPORTANT: Cite sources using this exact format: [@paper_id] - these will be converted to [1], [2], etc.
+3. Every factual statement, result, or method description MUST have a citation
+4. You can cite multiple sources together: [@paper_id1] [@paper_id2] or combine them
+5. Place citations at the end of the sentence or clause they support, before the period
+6. If making a general observation without a specific source, phrase it as "it is generally observed that..." without a citation
+7. Address contradictions by presenting both sides with their respective citations
+8. Be comprehensive but concise
+9. Use appropriate structure (subsections if needed)
+10. For comparisons, consider using tables with citations in relevant cells
+
+EXAMPLE OF GOOD CITATION USAGE:
+"Transformer models have achieved remarkable success in NLP tasks [@arxiv:1706.03762]. Building on this, BERT introduced bidirectional pre-training [@arxiv:1810.04805], which was later extended by RoBERTa [@arxiv:1907.11692] with improved training procedures."
 
 FORBIDDEN:
-- Do not invent facts or statistics
-- Do not cite papers not in the evidence
-- Do not use phrases like "state-of-the-art" or "first" without explicit evidence
+- Do not invent facts, statistics, or citations
+- Do not cite papers not listed in AVAILABLE SOURCES
+- Do not use phrases like "state-of-the-art", "best", or "first" without explicit citation
+- Do not write paragraphs of factual content without any citations
 
 Write the section content (markdown format):"""
 
