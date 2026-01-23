@@ -103,8 +103,8 @@ class ResearchState(BaseModel):
     issues: List[Issue] = Field(default_factory=list)
     coverage_scores: CoverageScores = Field(default_factory=CoverageScores)
     
-    # Bibliography
-    bib_entries: Dict[str, str] = Field(default_factory=dict)  # citekey -> bibtex
+    # Bibliography and citation tracking
+    bib_entries: Dict[str, Any] = Field(default_factory=dict)  # citation data (references text, paper mapping, etc.)
     
     # Final output
     final_report: str = ""
