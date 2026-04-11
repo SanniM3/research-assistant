@@ -1,13 +1,11 @@
 """Retriever agent - executes searches and retrieves papers."""
 from typing import Dict, Any, List
-from datetime import datetime
 import uuid
 
 from ..models.state import ResearchState, QueryRecord
 from ..models.paper import Paper
 from ..tools.arxiv import arxiv_search, parse_arxiv_results_to_papers
 from ..tools.web_search import web_search
-from .base import get_llm, create_agent_message
 
 
 def retriever_node(state: ResearchState) -> Dict[str, Any]:
@@ -43,10 +41,12 @@ def retriever_node(state: ResearchState) -> Dict[str, Any]:
             else:
                 continue
             
-            # Deduplicate
+            # Deduplicate against existing AND already-added papers in this batch
+            all_existing = state.candidate_papers + new_candidates
             for paper in papers:
-                if not is_duplicate(paper, state.candidate_papers, state.papers_ingested):
+                if not is_duplicate(paper, all_existing, state.papers_ingested):
                     new_candidates.append(paper)
+                    all_existing.append(paper)
             
             # Record query
             query_record = QueryRecord(

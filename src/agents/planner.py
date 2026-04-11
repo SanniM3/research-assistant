@@ -1,27 +1,30 @@
-"""Planner agent - creates research plan and outline."""
+"""Planner agent - creates research plan with preliminary questions and scope."""
 import json
 from typing import Dict, Any, List
 from langchain_core.messages import AIMessage
 
-from ..models.state import ResearchState, OutlineSection, AcceptanceCriteria
-from .base import get_llm, create_agent_message
+from ..models.state import (
+    ResearchState, OutlineSection, AcceptanceCriteria,
+    ResearchQuestion, QuestionStatus,
+)
+from .base import get_llm, create_agent_message, parse_llm_json
 
 
 def planner_node(state: ResearchState) -> Dict[str, Any]:
     """
-    Planner node - creates research plan, outline, and acceptance criteria.
-    
-    Responsibilities:
-    - Define research scope
-    - Generate research questions
-    - Create survey outline with sections
-    - Set acceptance criteria
+    Planner node - creates research scope, preliminary questions, and a
+    preliminary outline.
+
+    The outline produced here is intentionally tentative: it gives the
+    search planner enough structure to generate targeted queries, but will
+    be refined after research completes and we know what findings, groups,
+    and comparisons actually emerged.
     """
     llm = get_llm()
-    
+
     state.log_action("planner", "creating_plan", {"topic": state.topic})
-    
-    prompt = f"""Create a comprehensive research plan for the following topic:
+
+    prompt = f"""Create a research plan for the following topic:
 
 TOPIC: {state.topic}
 USER CONSTRAINTS: {state.user_constraints or "None specified"}
@@ -31,103 +34,59 @@ Provide your plan in the following JSON format:
 {{
     "scope": "A clear 2-3 sentence definition of the research scope",
     "research_questions": [
-        "Question 1...",
-        "Question 2...",
-        "Question 3..."
+        "Question 1 — the most important question the survey should answer",
+        "Question 2 — another key question",
+        "Question 3 — ..."
     ],
-    "outline": [
+    "preliminary_outline": [
         {{
             "section_id": "sec_1",
             "title": "Introduction",
-            "description": "What this section covers",
-            "required_elements": ["scope_definition", "motivation", "contributions"],
-            "min_claims": 3
+            "description": "What this section covers"
         }},
         {{
-            "section_id": "sec_2", 
+            "section_id": "sec_2",
             "title": "Background",
-            "description": "Foundational concepts and definitions",
-            "required_elements": ["definitions", "problem_formulation"],
-            "min_claims": 5
-        }},
-        {{
-            "section_id": "sec_3",
-            "title": "Taxonomy of Approaches",
-            "description": "Classification of methods in the field",
-            "required_elements": ["taxonomy", "category_descriptions"],
-            "min_claims": 8
-        }},
-        {{
-            "section_id": "sec_4",
-            "title": "Methods and Techniques",
-            "description": "Detailed review of major approaches",
-            "required_elements": ["method_descriptions", "comparisons"],
-            "min_claims": 10
-        }},
-        {{
-            "section_id": "sec_5",
-            "title": "Datasets and Benchmarks",
-            "description": "Evaluation resources in the field",
-            "required_elements": ["dataset_descriptions", "benchmark_table"],
-            "min_claims": 5
-        }},
-        {{
-            "section_id": "sec_6",
-            "title": "Experimental Results and Analysis",
-            "description": "Comparative analysis of approaches",
-            "required_elements": ["comparison_table", "analysis"],
-            "min_claims": 8
-        }},
-        {{
-            "section_id": "sec_7",
-            "title": "Discussion",
-            "description": "Trends, insights, and disagreements",
-            "required_elements": ["trends", "contradictions", "insights"],
-            "min_claims": 5
-        }},
-        {{
-            "section_id": "sec_8",
-            "title": "Open Problems and Future Directions",
-            "description": "Identified gaps and research opportunities",
-            "required_elements": ["open_problems", "future_directions"],
-            "min_claims": 5
-        }},
-        {{
-            "section_id": "sec_9",
-            "title": "Conclusion",
-            "description": "Summary and key takeaways",
-            "required_elements": ["summary", "recommendations"],
-            "min_claims": 3
+            "description": "Foundational concepts"
         }}
     ],
+    "key_concepts": ["concept1", "concept2"],
+    "expected_methods": ["method1", "method2"],
+    "expected_datasets": ["dataset1", "dataset2"],
     "acceptance_criteria": {{
         "min_papers": 15,
-        "min_claims_per_section": 3,
-        "taxonomy_coverage": 0.7,
-        "benchmark_coverage": 0.6,
-        "require_seminal_papers": true,
-        "require_recent_papers": true,
-        "max_open_blockers": 0,
+        "min_answered_questions_ratio": 0.7,
+        "max_open_follow_ups": 3,
         "max_open_majors": 2
-    }},
-    "key_concepts": ["concept1", "concept2", "concept3"],
-    "expected_methods": ["method1", "method2"],
-    "expected_datasets": ["dataset1", "dataset2"]
+    }}
 }}
 
-Customize this structure appropriately for the specific topic. Add or remove sections as needed.
+Guidelines:
+- Research questions should be specific, answerable through literature.
+- Keep them to 4-7 questions; the system will add follow-ups during research.
+- The preliminary outline is a rough skeleton (5-8 sections). It WILL be
+  revised after research based on actual findings.
+- Acceptance criteria control when the system stops researching.
+
 Output ONLY valid JSON, no additional text."""
 
     messages = create_agent_message("planner", prompt)
     response = llm.invoke(messages)
-    
-    try:
-        # Parse the JSON response
-        plan = json.loads(response.content)
-        
-        # Create outline sections
+
+    plan = parse_llm_json(response.content, fallback=None, agent="planner")
+
+    if plan and isinstance(plan, dict):
+        questions = []
+        for i, q_text in enumerate(plan.get("research_questions", [])):
+            questions.append(ResearchQuestion(
+                question_id=f"rq_{i+1}",
+                text=q_text,
+                status=QuestionStatus.OPEN,
+                iteration_created=0,
+            ))
+
         outline = []
-        for i, sec_data in enumerate(plan.get("outline", [])):
+        for i, sec_data in enumerate(plan.get("preliminary_outline", plan.get("outline", []))):
             section = OutlineSection(
                 section_id=sec_data.get("section_id", f"sec_{i+1}"),
                 title=sec_data.get("title", f"Section {i+1}"),
@@ -137,46 +96,50 @@ Output ONLY valid JSON, no additional text."""
                 min_claims=sec_data.get("min_claims", 3),
             )
             outline.append(section)
-        
-        # Create acceptance criteria
-        criteria_data = plan.get("acceptance_criteria", {})
+
+        crit = plan.get("acceptance_criteria", {})
         criteria = AcceptanceCriteria(
-            min_papers=criteria_data.get("min_papers", 15),
-            min_claims_per_section=criteria_data.get("min_claims_per_section", 3),
-            taxonomy_coverage=criteria_data.get("taxonomy_coverage", 0.7),
-            benchmark_coverage=criteria_data.get("benchmark_coverage", 0.6),
-            require_seminal_papers=criteria_data.get("require_seminal_papers", True),
-            require_recent_papers=criteria_data.get("require_recent_papers", True),
-            max_open_blockers=criteria_data.get("max_open_blockers", 0),
-            max_open_majors=criteria_data.get("max_open_majors", 2),
+            min_papers=crit.get("min_papers", 15),
+            min_answered_questions_ratio=crit.get("min_answered_questions_ratio", 0.7),
+            max_open_follow_ups=crit.get("max_open_follow_ups", 3),
+            max_open_majors=crit.get("max_open_majors", 2),
+            require_seminal_papers=crit.get("require_seminal_papers", True),
+            require_recent_papers=crit.get("require_recent_papers", True),
         )
-        
+
         return {
             "scope": plan.get("scope", ""),
-            "research_questions": plan.get("research_questions", []),
+            "research_questions": questions,
             "outline": outline,
+            "outline_finalized": False,
             "acceptance_criteria": criteria,
             "phase": "search_planning",
         }
-        
-    except json.JSONDecodeError as e:
-        # Handle JSON parsing error - try to extract key info
-        state.log_action("planner", "json_parse_error", {"error": str(e)})
-        
-        # Create minimal default outline
-        default_outline = create_default_outline()
-        
-        return {
-            "scope": f"Research survey on: {state.topic}",
-            "research_questions": [f"What are the main approaches to {state.topic}?"],
-            "outline": default_outline,
-            "acceptance_criteria": AcceptanceCriteria(),
-            "phase": "search_planning",
-        }
+
+    state.log_action("planner", "json_parse_error_using_defaults", {})
+
+    default_questions = [
+        ResearchQuestion(
+            question_id="rq_1",
+            text=f"What are the main approaches to {state.topic}?",
+            status=QuestionStatus.OPEN,
+            iteration_created=0,
+        )
+    ]
+    default_outline = create_default_outline()
+
+    return {
+        "scope": f"Research survey on: {state.topic}",
+        "research_questions": default_questions,
+        "outline": default_outline,
+        "outline_finalized": False,
+        "acceptance_criteria": AcceptanceCriteria(),
+        "phase": "search_planning",
+    }
 
 
 def create_default_outline() -> List[OutlineSection]:
-    """Create a default survey outline."""
+    """Create a default preliminary survey outline."""
     sections = [
         ("Introduction", "Overview and motivation", ["scope", "motivation"]),
         ("Background", "Foundational concepts", ["definitions", "formulation"]),
@@ -185,7 +148,7 @@ def create_default_outline() -> List[OutlineSection]:
         ("Discussion", "Analysis and trends", ["trends", "insights"]),
         ("Conclusion", "Summary and future work", ["summary", "future"]),
     ]
-    
+
     outline = []
     for i, (title, desc, elements) in enumerate(sections):
         outline.append(OutlineSection(
@@ -196,5 +159,5 @@ def create_default_outline() -> List[OutlineSection]:
             required_elements=elements,
             min_claims=3,
         ))
-    
+
     return outline

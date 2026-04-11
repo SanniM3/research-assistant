@@ -5,7 +5,7 @@ from langchain_core.messages import AIMessage
 
 from ..models.state import ResearchState
 from ..models.issue import IssueCategory
-from .base import get_llm, create_agent_message
+from .base import get_llm, create_agent_message, parse_llm_json
 
 
 def search_planner_node(state: ResearchState) -> Dict[str, Any]:
@@ -31,6 +31,7 @@ def search_planner_node(state: ResearchState) -> Dict[str, Any]:
         IssueCategory.BENCHMARK_GAP,
         IssueCategory.MISSING_SEMINAL,
         IssueCategory.MISSING_RECENT,
+        IssueCategory.NEEDS_FOLLOW_UP,
     ]]
     
     # Build context about what we already have
@@ -41,8 +42,8 @@ def search_planner_node(state: ResearchState) -> Dict[str, Any]:
 TOPIC: {state.topic}
 SCOPE: {state.scope}
 
-RESEARCH QUESTIONS:
-{json.dumps(state.research_questions, indent=2)}
+RESEARCH QUESTIONS (open/partially answered):
+{json.dumps([{"id": q.question_id, "text": q.text, "status": q.status.value} for q in state.get_open_questions()], indent=2)}
 
 OUTLINE SECTIONS:
 {json.dumps([{"title": s.title, "description": s.description} for s in state.outline], indent=2)}
@@ -91,39 +92,34 @@ Output ONLY valid JSON."""
     messages = create_agent_message("search_planner", prompt)
     response = llm.invoke(messages)
     
-    try:
-        queries_data = json.loads(response.content)
-        
-        # Extract queries as simple list for pending_queries
+    queries_data = parse_llm_json(response.content, fallback=None, agent="search_planner")
+
+    if queries_data and isinstance(queries_data, dict):
         pending = []
-        
+
         for q in queries_data.get("arxiv_queries", []):
             query_text = q.get("query", "")
             if query_text and query_text not in existing_queries:
-                # Format: "arxiv:query_text"
                 pending.append(f"arxiv:{query_text}")
-        
+
         for q in queries_data.get("web_queries", []):
             query_text = q.get("query", "")
             if query_text and query_text not in existing_queries:
-                # Format: "web:query_text"
                 pending.append(f"web:{query_text}")
-        
+
         return {
             "pending_queries": pending,
             "phase": "retrieval",
         }
-        
-    except json.JSONDecodeError:
-        # Fallback: generate basic queries from topic
-        basic_queries = generate_basic_queries(state.topic, state.research_questions)
-        return {
-            "pending_queries": basic_queries,
-            "phase": "retrieval",
-        }
+
+    basic_queries = generate_basic_queries(state.topic, state.research_questions)
+    return {
+        "pending_queries": basic_queries,
+        "phase": "retrieval",
+    }
 
 
-def generate_basic_queries(topic: str, research_questions: List[str]) -> List[str]:
+def generate_basic_queries(topic: str, research_questions) -> List[str]:
     """Generate basic queries from topic and research questions."""
     queries = [
         f"arxiv:{topic} survey",
@@ -132,33 +128,14 @@ def generate_basic_queries(topic: str, research_questions: List[str]) -> List[st
         f"web:{topic} survey paper",
         f"web:{topic} datasets benchmarks",
     ]
-    
-    # Add queries from research questions
-    for rq in research_questions[:3]:
-        # Extract key terms
-        key_terms = " ".join([w for w in rq.split() if len(w) > 4])[:50]
+
+    # Accept either ResearchQuestion objects or plain strings
+    for rq in (research_questions or [])[:3]:
+        text = rq.text if hasattr(rq, "text") else str(rq)
+        key_terms = " ".join([w for w in text.split() if len(w) > 4])[:50]
         if key_terms:
             queries.append(f"arxiv:{key_terms}")
-    
+
     return queries
 
 
-def generate_gap_filling_queries(issues: List) -> List[str]:
-    """Generate queries specifically to address identified gaps."""
-    queries = []
-    
-    for issue in issues:
-        # Use suggested queries from issue if available
-        if issue.suggested_queries:
-            for sq in issue.suggested_queries[:2]:
-                queries.append(f"arxiv:{sq}")
-        
-        # Generate based on category
-        if issue.category == IssueCategory.MISSING_SEMINAL:
-            queries.append(f"arxiv:{issue.description} seminal foundational")
-        elif issue.category == IssueCategory.MISSING_RECENT:
-            queries.append(f"arxiv:{issue.description} 2023 2024 recent")
-        elif issue.category == IssueCategory.BENCHMARK_GAP:
-            queries.append(f"web:{issue.description} benchmark dataset evaluation")
-    
-    return queries

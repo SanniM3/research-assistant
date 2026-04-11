@@ -24,6 +24,7 @@ class IssueCategory(str, Enum):
     MISSING_RECENT = "missing_recent"
     WEAK_EVIDENCE = "weak_evidence"
     STRUCTURAL = "structural"
+    NEEDS_FOLLOW_UP = "needs_follow_up"
 
 
 class IssueStatus(str, Enum):
@@ -50,6 +51,7 @@ class Issue(BaseModel):
         linked_claim_ids: Claims related to this issue
         suggested_queries: Search queries that might resolve this
         suggested_papers: Specific papers to look for
+        follow_up_questions: Probing questions raised by this issue's claims
         status: Current resolution status
         resolution_notes: How the issue was resolved
         created_at: When issue was identified
@@ -64,6 +66,7 @@ class Issue(BaseModel):
     linked_claim_ids: List[str] = Field(default_factory=list)
     suggested_queries: List[str] = Field(default_factory=list)
     suggested_papers: List[str] = Field(default_factory=list)
+    follow_up_questions: List[str] = Field(default_factory=list)
     status: IssueStatus = IssueStatus.OPEN
     resolution_notes: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)

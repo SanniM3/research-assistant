@@ -6,7 +6,7 @@ import uuid
 
 from ..models.state import ResearchState
 from ..models.issue import Issue, IssueSeverity, IssueCategory, IssueStatus
-from .base import get_llm, create_agent_message
+from .base import get_llm, create_agent_message, parse_llm_json
 
 
 def verifier_node(state: ResearchState) -> Dict[str, Any]:
@@ -56,7 +56,7 @@ def verifier_node(state: ResearchState) -> Dict[str, Any]:
     
     return {
         "issues": issues,
-        "phase": "gap_scoring",
+        "phase": "verification",
     }
 
 
@@ -110,13 +110,12 @@ Output ONLY valid JSON."""
     messages = create_agent_message("verifier", prompt)
     response = llm.invoke(messages)
     
-    try:
-        data = json.loads(response.content)
-        
+    data = parse_llm_json(response.content, fallback=None, agent="verifier")
+
+    if data and isinstance(data, dict):
         for issue_data in data.get("issues", []):
             issue_type = issue_data.get("type", "unsupported_claim")
-            
-            # Map to IssueCategory
+
             category_map = {
                 "unsupported_claim": IssueCategory.UNSUPPORTED_CLAIM,
                 "missing_citation": IssueCategory.MISSING_CITATION,
@@ -124,18 +123,17 @@ Output ONLY valid JSON."""
                 "potential_contradiction": IssueCategory.CONTRADICTION,
             }
             category = category_map.get(issue_type, IssueCategory.UNSUPPORTED_CLAIM)
-            
-            # Map severity
+
             severity_map = {
                 "blocker": IssueSeverity.BLOCKER,
                 "major": IssueSeverity.MAJOR,
                 "minor": IssueSeverity.MINOR,
             }
             severity = severity_map.get(
-                issue_data.get("severity", "minor"), 
+                issue_data.get("severity", "minor"),
                 IssueSeverity.MINOR
             )
-            
+
             issue = Issue(
                 issue_id=f"issue_{uuid.uuid4().hex[:8]}",
                 severity=severity,
@@ -146,8 +144,7 @@ Output ONLY valid JSON."""
                 created_by="verifier_agent",
             )
             issues.append(issue)
-        
-        # Check invalid citations
+
         for invalid in data.get("citation_validity", {}).get("invalid_citations", []):
             issue = Issue(
                 issue_id=f"issue_{uuid.uuid4().hex[:8]}",
@@ -159,9 +156,7 @@ Output ONLY valid JSON."""
                 created_by="verifier_agent",
             )
             issues.append(issue)
-            
-    except json.JSONDecodeError:
-        # On parse failure, do basic checks
+    else:
         issues.extend(basic_grounding_check(section_id, content, papers))
     
     return issues

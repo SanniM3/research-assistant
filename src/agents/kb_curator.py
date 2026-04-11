@@ -6,7 +6,6 @@ from ..models.state import ResearchState
 from ..models.entity import Entity, EntityType
 from ..models.relation import Relation
 from ..models.claim import Claim
-from .base import get_llm
 
 
 def kb_curator_node(state: ResearchState) -> Dict[str, Any]:
@@ -41,18 +40,19 @@ def kb_curator_node(state: ResearchState) -> Dict[str, Any]:
     claims = link_claims_to_entities(claims, entities)
     
     # Step 4: Validate referential integrity
-    validate_integrity(claims, entities, relations, state.chunks)
-    
+    integrity_warnings = validate_integrity(claims, entities, relations, state.chunks)
+
     state.log_action("kb_curator", "completed", {
         "entities_after_merge": len(entities),
         "merges_performed": len(merge_map),
+        "integrity_warnings": len(integrity_warnings),
     })
     
     return {
         "entities": entities,
         "relations": relations,
         "claims": claims,
-        "phase": "synthesis",
+        "phase": "gap_scoring",
     }
 
 
@@ -199,18 +199,22 @@ def link_claims_to_entities(claims: Dict[str, Claim],
 
 
 def validate_integrity(claims: Dict[str, Claim], entities: Dict[str, Entity],
-                      relations: Dict[str, Relation], chunks: Dict) -> None:
-    """Validate referential integrity of knowledge base."""
-    # Check claim evidence references
-    for claim in claims.values():
+                      relations: Dict[str, Relation], chunks: Dict) -> List[str]:
+    """Validate referential integrity of knowledge base.
+
+    Returns a list of warning strings (empty when everything is consistent).
+    """
+    warnings: List[str] = []
+
+    for claim_id, claim in claims.items():
         for evidence in claim.evidence:
             if evidence.chunk_id and evidence.chunk_id not in chunks:
-                # Log warning but don't fail
-                pass
-    
-    # Check relation entity references
-    for relation in relations.values():
+                warnings.append(f"Claim {claim_id}: evidence chunk {evidence.chunk_id} missing")
+
+    for rel_id, relation in relations.items():
         if relation.subject_entity_id not in entities:
-            pass
+            warnings.append(f"Relation {rel_id}: subject {relation.subject_entity_id} missing")
         if relation.object_entity_id not in entities:
-            pass
+            warnings.append(f"Relation {rel_id}: object {relation.object_entity_id} missing")
+
+    return warnings

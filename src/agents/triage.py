@@ -1,11 +1,10 @@
 """Triage agent - screens papers for relevance."""
 import json
 from typing import Dict, Any, List
-from langchain_core.messages import AIMessage
 
 from ..models.state import ResearchState
 from ..models.paper import Paper, PaperMetadata
-from .base import get_llm, create_agent_message
+from .base import get_llm, create_agent_message, parse_llm_json
 
 
 def triage_node(state: ResearchState) -> Dict[str, Any]:
@@ -94,15 +93,16 @@ Output ONLY valid JSON."""
         messages = create_agent_message("triage", prompt)
         response = llm.invoke(messages)
         
-        try:
-            triage_results = json.loads(response.content)
-            
+        triage_results = parse_llm_json(
+            response.content, fallback=None, agent="triage"
+        )
+
+        if triage_results and isinstance(triage_results, dict):
             for decision in triage_results.get("decisions", []):
                 paper_id = decision.get("paper_id")
                 if decision.get("decision") == "INGEST":
                     selected_ids.append(paper_id)
-                    
-                    # Update paper metadata
+
                     paper = next((p for p in batch if p.paper_id == paper_id), None)
                     if paper:
                         tags = decision.get("tags", {})
@@ -112,30 +112,26 @@ Output ONLY valid JSON."""
                             method_type=tags.get("method_type"),
                             is_seminal=tags.get("is_seminal", False),
                         )
-                
-        except json.JSONDecodeError:
-            # On parse error, include all papers from batch
+        else:
+            state.log_action("triage", "batch_parse_error_fallback", {
+                "batch_start": i,
+                "batch_size": len(batch),
+            })
             for p in batch:
-                if p.paper_id not in selected_ids:
-                    selected_ids.append(p.paper_id)
+                selected_ids.append(p.paper_id)
     
+    # Prune candidate_papers to only keep those that were selected.
+    # Rejected papers are dead weight in the state (ingestion only needs
+    # selected ones).  This significantly reduces state serialisation size.
+    selected_set = set(selected_ids)
+    pruned_candidates = [
+        p for p in state.candidate_papers if p.paper_id in selected_set
+    ]
+
     return {
         "selected_papers": selected_ids,
+        "candidate_papers": pruned_candidates,
         "phase": "ingestion",
     }
 
 
-def calculate_relevance_score(paper: Paper, topic: str, scope: str) -> float:
-    """Calculate a simple relevance score based on keyword overlap."""
-    topic_words = set(topic.lower().split())
-    scope_words = set(scope.lower().split()) if scope else set()
-    
-    # Get words from paper
-    paper_text = f"{paper.title} {paper.abstract or ''}".lower()
-    paper_words = set(paper_text.split())
-    
-    # Calculate overlap
-    topic_overlap = len(topic_words & paper_words) / len(topic_words) if topic_words else 0
-    scope_overlap = len(scope_words & paper_words) / len(scope_words) if scope_words else 0
-    
-    return (topic_overlap * 0.7 + scope_overlap * 0.3)

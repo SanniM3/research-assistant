@@ -39,6 +39,7 @@ class Paper(BaseModel):
         arxiv_id: arXiv identifier
         url_list: List of URLs where paper can be accessed
         abstract: Paper abstract
+        full_text: Full paper content (populated on ingestion)
         language: Primary language of the paper
         version_group_id: Groups arXiv versions / extensions
         retrieved_at: Timestamp of retrieval
@@ -63,6 +64,7 @@ class Paper(BaseModel):
     license_notes: Optional[str] = None
     metadata_confidence: MetadataConfidence = MetadataConfidence.MEDIUM
     metadata: PaperMetadata = Field(default_factory=PaperMetadata)
+    full_text: Optional[str] = None
     is_ingested: bool = False
     ingestion_status: str = "pending"
     

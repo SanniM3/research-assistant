@@ -1,13 +1,11 @@
 """Ingestion agent - fetches and processes full paper content."""
-from typing import Dict, Any, List, Optional
-import traceback
+from typing import Dict, Any, List
 
 from ..models.state import ResearchState
 from ..models.paper import Paper
 from ..models.chunk import Chunk, SourceType
 from ..tools.document_loaders import load_pdf, load_arxiv_html, load_html, DocumentLoadError
 from ..tools.chunking import chunk_document, chunk_text, chunk_with_sections
-from .base import get_llm
 
 
 def ingestion_node(state: ResearchState) -> Dict[str, Any]:
@@ -89,14 +87,14 @@ def ingest_paper(paper: Paper) -> List[Chunk]:
         chunks = try_arxiv_html_ingestion(paper)
         if chunks:
             return chunks
-    
+
     # Try PDF
     pdf_url = paper.get_pdf_url()
     if pdf_url:
         chunks = try_pdf_ingestion(paper, pdf_url)
         if chunks:
             return chunks
-    
+
     # Try web HTML as fallback
     for url in paper.url_list:
         if url and not url.endswith(".pdf"):

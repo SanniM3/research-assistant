@@ -1,9 +1,14 @@
 """Base agent utilities and prompts."""
-from typing import Optional
+import json
+import re
+from typing import Optional, Any
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from ..config.settings import get_settings
+from ..utils.logging import get_logger
+
+_logger = get_logger("agents.base")
 
 
 def get_llm(temperature: Optional[float] = None) -> ChatOpenAI:
@@ -13,6 +18,33 @@ def get_llm(temperature: Optional[float] = None) -> ChatOpenAI:
         model=settings.llm_model,
         temperature=temperature if temperature is not None else settings.llm_temperature,
     )
+
+
+def parse_llm_json(text: str, *, fallback: Any = None, agent: str = "") -> Any:
+    """Parse JSON from LLM output, handling markdown code fences.
+
+    LLMs frequently wrap JSON in ```json ... ``` blocks even when asked
+    not to.  This helper strips those fences before parsing.  On failure
+    it returns *fallback* (default ``None``) instead of raising.
+    """
+    cleaned = text.strip()
+
+    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+    fence_re = re.compile(
+        r"^```(?:json|JSON)?\s*\n?(.*?)```\s*$", re.DOTALL
+    )
+    m = fence_re.match(cleaned)
+    if m:
+        cleaned = m.group(1).strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        _logger.warning(
+            "%s: JSON parse failed – %s (first 200 chars: %s)",
+            agent or "llm", exc, cleaned[:200],
+        )
+        return fallback
 
 
 # System prompts for each agent role
@@ -113,14 +145,23 @@ Be strict about grounding. Unsupported claims are not acceptable.""",
 
     "gap_scorer": """You are the Gap Scorer agent.
 Your role is to:
-1. Compute coverage scores against the outline acceptance criteria
-2. Assess taxonomy completeness
-3. Assess benchmark/dataset coverage
-4. Assess timeline coverage (seminal + recent papers)
-5. Assess venue/source diversity
-6. Emit prioritized tasks for the next iteration
+1. Evaluate whether research questions have been answered by the claims gathered
+2. Identify follow-up questions that emerge from current findings
+3. Compute coverage scores (taxonomy, benchmarks, timeline, venue diversity)
+4. Compute ARR-style review scores (soundness, coverage, question sufficiency)
+5. Decide whether the research loop should continue or stop
 
-Use objective metrics wherever possible.""",
+Prioritise question-answering depth over raw paper/claim counts.""",
+
+    "outline_refiner": """You are the Outline Refiner agent.
+Your role is to:
+1. Take the preliminary outline and reshape it based on actual research findings
+2. Group methods/topics that naturally cluster together
+3. Add sections for comparisons, benchmarks, or discussions that the evidence supports
+4. Remove planned sections that have no supporting evidence
+5. Ensure the final outline reflects the real structure of the field
+
+The outline you produce is what the synthesizer will write to.""",
 
     "citation_manager": """You are the Citation Manager agent.
 Your role is to:

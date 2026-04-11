@@ -8,7 +8,7 @@ from ..models.claim import Claim, ClaimType, Evidence, ConfidenceLevel
 from ..models.entity import Entity, EntityType
 from ..models.relation import Relation, RelationType
 from ..models.chunk import Chunk
-from .base import get_llm, create_agent_message
+from .base import get_llm, create_agent_message, parse_llm_json
 
 
 def extractor_node(state: ResearchState) -> Dict[str, Any]:
@@ -25,11 +25,15 @@ def extractor_node(state: ResearchState) -> Dict[str, Any]:
     
     state.log_action("extractor", "starting", {"chunk_count": len(state.chunks)})
     
-    # Get chunks from papers not yet extracted
-    extracted_paper_ids = set(c.paper_id for c in state.claims.values())
+    # Get chunks not yet processed — track at chunk level, not paper level,
+    # so partially-extracted papers still get their remaining chunks processed.
+    extracted_chunk_ids = set()
+    for claim in state.claims.values():
+        for ev in claim.evidence:
+            extracted_chunk_ids.add(ev.chunk_id)
     chunks_to_extract = [
         c for c in state.chunks.values()
-        if c.paper_id not in extracted_paper_ids
+        if c.chunk_id not in extracted_chunk_ids
     ]
     
     if not chunks_to_extract:
@@ -150,10 +154,9 @@ Output ONLY valid JSON."""
     entities = []
     relations = []
     
-    try:
-        data = json.loads(response.content)
-        
-        # Process claims
+    data = parse_llm_json(response.content, fallback=None, agent="extractor")
+
+    if data and isinstance(data, dict):
         for claim_data in data.get("claims", []):
             claim_id = f"claim_{uuid.uuid4().hex[:8]}"
             claim_type = ClaimType(claim_data.get("type", "method_summary"))
@@ -212,8 +215,5 @@ Output ONLY valid JSON."""
                 evidence_chunks=[rel_data.get("evidence_chunk_id", "")],
             )
             relations.append(relation)
-            
-    except json.JSONDecodeError:
-        pass
-    
+
     return claims, entities, relations

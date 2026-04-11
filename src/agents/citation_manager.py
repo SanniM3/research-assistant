@@ -1,11 +1,27 @@
 """Citation Manager agent - handles bibliography management with IEEE-style citations."""
+import json
 import re
 from typing import Dict, Any, List, Optional, Tuple
 from collections import OrderedDict
 
 from ..models.state import ResearchState
 from ..models.paper import Paper
-from .base import get_llm
+
+
+def _strip_chunk_suffix(ref: str) -> str:
+    """Strip an optional chunk_id suffix from a citation reference.
+
+    Paper IDs may contain colons (e.g. ``arxiv:1706.03762``).  The
+    convention ``[@paper_id:chunk_id]`` uses a *chunk-style* suffix
+    (``chunk_`` prefix).  We only strip the last colon segment if it
+    looks like a chunk id; otherwise we keep the full string.
+    """
+    if ":" not in ref:
+        return ref
+    head, tail = ref.rsplit(":", 1)
+    if tail.startswith("chunk_") or tail.startswith("chk_"):
+        return head
+    return ref
 
 
 def citation_manager_node(state: ResearchState) -> Dict[str, Any]:
@@ -24,25 +40,67 @@ def citation_manager_node(state: ResearchState) -> Dict[str, Any]:
     
     # First pass: collect all cited paper IDs from draft sections
     all_content = "\n".join(state.draft_sections.values())
-    cited_paper_ids = extract_cited_paper_ids(all_content, state.papers_ingested)
+    cited_paper_ids, citation_mapping = extract_cited_paper_ids(all_content, state.papers_ingested)
+    
+    # Collect unresolved citations for placeholder handling
+    unresolved = [k for k, v in citation_mapping.items() if v is None]
+    
+    # If no citations were resolved, include all ingested papers as potential references
+    if not cited_paper_ids and state.papers_ingested:
+        cited_paper_ids = list(state.papers_ingested.keys())
     
     # Assign citation numbers (in order of first appearance)
-    paper_to_number = assign_citation_numbers(cited_paper_ids, state.draft_sections)
+    paper_to_number, citation_to_number = assign_citation_numbers(
+        cited_paper_ids, citation_mapping, state.draft_sections, state.papers_ingested
+    )
+    
+    # Handle unresolved citations - assign them numbers and create placeholder references
+    unresolved_refs = {}
+    if unresolved:
+        next_number = max(paper_to_number.values()) + 1 if paper_to_number else 1
+        for citation_text in unresolved:
+            if citation_text not in citation_to_number:
+                citation_to_number[citation_text] = next_number
+                unresolved_refs[citation_text] = next_number
+                next_number += 1
     
     # Update draft sections with numbered citations
     updated_drafts = {}
     for section_id, content in state.draft_sections.items():
-        updated_content = convert_to_ieee_citations(content, paper_to_number, state.papers_ingested)
+        updated_content = convert_to_ieee_citations(
+            content, paper_to_number, citation_to_number, state.papers_ingested
+        )
         updated_drafts[section_id] = updated_content
     
-    # Generate numbered reference list
+    # Generate numbered reference list (resolved papers)
     references = generate_numbered_references(paper_to_number, state.papers_ingested)
     
-    # Store as bib_entries (repurposing the field for formatted references)
-    bib_entries = {"_references_text": references, "_paper_to_number": paper_to_number}
+    # Add placeholder references for unresolved citations
+    if unresolved_refs:
+        placeholder_refs = []
+        for citation_text, number in sorted(unresolved_refs.items(), key=lambda x: x[1]):
+            placeholder_refs.append(format_placeholder_reference(citation_text, number))
+        if placeholder_refs:
+            if references:
+                references += "\n\n" + "\n\n".join(placeholder_refs)
+            else:
+                references = "\n\n".join(placeholder_refs)
+    
+    if unresolved:
+        state.log_action("citation_manager", "unresolved_citations", {
+            "unresolved": unresolved[:10]  # Log first 10
+        })
+    
+    # Store as bib_entries — serialize paper_to_number as a JSON string to
+    # avoid Pydantic / LangGraph checkpoint validation issues with nested dicts.
+    bib_entries = {
+        "_references_text": references,
+        "_paper_to_number": json.dumps(paper_to_number),
+    }
     
     state.log_action("citation_manager", "completed", {
-        "citations_processed": len(paper_to_number)
+        "citations_resolved": len(paper_to_number),
+        "citations_unresolved": len(unresolved_refs)
     })
     
     return {
@@ -51,29 +109,55 @@ def citation_manager_node(state: ResearchState) -> Dict[str, Any]:
     }
 
 
-def extract_cited_paper_ids(content: str, papers: Dict[str, Paper]) -> List[str]:
-    """Extract all paper IDs cited in the content."""
-    # Pattern: [@paper_id:chunk_id] or [@paper_id] or existing attempts like [paper_id]
+def extract_cited_paper_ids(content: str, papers: Dict[str, Paper]) -> Tuple[List[str], Dict[str, str]]:
+    """
+    Extract all paper IDs cited in the content.
+    
+    Returns:
+        Tuple of (resolved_paper_ids, citation_to_paper_mapping)
+    """
+    # [@paper_id] or [@paper_id:chunk_id] — paper_id may contain colons (e.g. arxiv:1706.03762)
+    # so we capture the full content and split on the LAST colon for chunk_id.
     patterns = [
-        r'\[@([^\]:]+)(?::[^\]]+)?\]',  # [@paper_id:chunk_id] or [@paper_id]
-        r'\\cite\{([^}]+)\}',            # \cite{citekey}
+        r'\[@([^\]]+)\]',        # [@...] — full content between brackets
+        r'\\cite\{([^}]+)\}',   # \cite{citekey}
     ]
-    
+
     cited_ids = []
-    
+    citation_mapping = {}
+
     for pattern in patterns:
         matches = re.findall(pattern, content)
         for match in matches:
-            # Handle multiple citations in one reference
             ids = [m.strip() for m in match.split(",")]
-            for paper_id in ids:
-                if paper_id not in cited_ids:
-                    # Try to resolve to actual paper ID
-                    resolved = resolve_paper_id(paper_id, papers)
-                    if resolved and resolved not in cited_ids:
+            for raw_ref in ids:
+                citation_text = _strip_chunk_suffix(raw_ref)
+                if citation_text in citation_mapping:
+                    continue
+                    
+                # Try to resolve to actual paper ID
+                resolved = resolve_paper_id(citation_text, papers)
+                if resolved:
+                    citation_mapping[citation_text] = resolved
+                    if resolved not in cited_ids:
                         cited_ids.append(resolved)
+                else:
+                    # Keep unresolved citations for later handling
+                    citation_mapping[citation_text] = None
     
-    return cited_ids
+    return cited_ids, citation_mapping
+
+
+def normalize_arxiv_id(arxiv_id: str) -> str:
+    """Normalize arxiv ID by removing version suffix and 'arxiv:' prefix."""
+    if not arxiv_id:
+        return ""
+    # Remove 'arxiv:' prefix if present
+    normalized = arxiv_id.lower().replace("arxiv:", "").strip()
+    # Remove version suffix (e.g., v1, v2)
+    if "v" in normalized:
+        normalized = normalized.split("v")[0]
+    return normalized
 
 
 def resolve_paper_id(ref: str, papers: Dict[str, Paper]) -> Optional[str]:
@@ -82,13 +166,25 @@ def resolve_paper_id(ref: str, papers: Dict[str, Paper]) -> Optional[str]:
     if ref in papers:
         return ref
     
-    # Try matching by partial ID
+    # Normalize the reference for comparison
+    ref_normalized = normalize_arxiv_id(ref)
+    
+    # Try matching by normalized arxiv ID
+    for paper_id, paper in papers.items():
+        # Check paper_id itself
+        paper_id_normalized = normalize_arxiv_id(paper_id)
+        if ref_normalized and paper_id_normalized and ref_normalized == paper_id_normalized:
+            return paper_id
+        
+        # Check paper's arxiv_id field
+        if paper.arxiv_id:
+            paper_arxiv_normalized = normalize_arxiv_id(paper.arxiv_id)
+            if ref_normalized and paper_arxiv_normalized == ref_normalized:
+                return paper_id
+    
+    # Try partial matching (ref contains paper_id or vice versa)
     for paper_id in papers:
         if ref in paper_id or paper_id in ref:
-            return paper_id
-        # Try matching arxiv ID
-        paper = papers[paper_id]
-        if paper.arxiv_id and (ref in paper.arxiv_id or paper.arxiv_id in ref):
             return paper_id
     
     # Try matching by citekey-like format (author year)
@@ -99,32 +195,57 @@ def resolve_paper_id(ref: str, papers: Dict[str, Paper]) -> Optional[str]:
             if first_author_last in ref_lower and str(paper.year) in ref:
                 return paper_id
     
+    # Try matching by title keywords (last resort)
+    ref_words = set(ref_lower.replace("_", " ").replace("-", " ").split())
+    if len(ref_words) >= 2:
+        for paper_id, paper in papers.items():
+            if paper.title:
+                title_words = set(paper.title.lower().split())
+                if len(ref_words & title_words) >= 2:
+                    return paper_id
+    
     return None
 
 
-def assign_citation_numbers(cited_ids: List[str], draft_sections: Dict[str, str]) -> Dict[str, int]:
-    """Assign citation numbers in order of first appearance."""
+def assign_citation_numbers(cited_ids: List[str], citation_mapping: Dict[str, Optional[str]],
+                            draft_sections: Dict[str, str], 
+                            papers: Dict[str, Paper]) -> Tuple[Dict[str, int], Dict[str, int]]:
+    """
+    Assign citation numbers in order of first appearance.
+    
+    Returns:
+        Tuple of (paper_id -> number, original_citation_text -> number)
+    """
     paper_to_number = OrderedDict()
+    citation_to_number = {}  # Maps original citation text to number
     citation_counter = 1
     
     # Process sections in order to assign numbers by first appearance
     for section_id in sorted(draft_sections.keys()):
         content = draft_sections[section_id]
         
-        # Find all citations in this section
         patterns = [
-            r'\[@([^\]:]+)(?::[^\]]+)?\]',
+            r'\[@([^\]]+)\]',
             r'\\cite\{([^}]+)\}',
         ]
-        
+
         for pattern in patterns:
             for match in re.finditer(pattern, content):
                 ref = match.group(1)
-                ids = [m.strip() for m in ref.split(",")]
-                for paper_id in ids:
-                    if paper_id in cited_ids and paper_id not in paper_to_number:
-                        paper_to_number[paper_id] = citation_counter
+                ids = [_strip_chunk_suffix(m.strip()) for m in ref.split(",")]
+                for citation_text in ids:
+                    # Try to resolve this citation
+                    resolved = citation_mapping.get(citation_text)
+                    if not resolved:
+                        resolved = resolve_paper_id(citation_text, papers)
+                    
+                    if resolved and resolved not in paper_to_number:
+                        paper_to_number[resolved] = citation_counter
                         citation_counter += 1
+                    
+                    # Map the original citation text to the number
+                    if resolved and resolved in paper_to_number:
+                        citation_to_number[citation_text] = paper_to_number[resolved]
     
     # Add any remaining cited papers that weren't found in sections
     for paper_id in cited_ids:
@@ -132,10 +253,11 @@ def assign_citation_numbers(cited_ids: List[str], draft_sections: Dict[str, str]
             paper_to_number[paper_id] = citation_counter
             citation_counter += 1
     
-    return dict(paper_to_number)
+    return dict(paper_to_number), citation_to_number
 
 
-def convert_to_ieee_citations(content: str, paper_to_number: Dict[str, int], 
+def convert_to_ieee_citations(content: str, paper_to_number: Dict[str, int],
+                              citation_to_number: Dict[str, int],
                               papers: Dict[str, Paper]) -> str:
     """Convert internal citations to IEEE-style [N] format."""
     
@@ -143,13 +265,15 @@ def convert_to_ieee_citations(content: str, paper_to_number: Dict[str, int],
         full_match = match.group(0)
         ref_content = match.group(1)
         
-        # Handle multiple citations
-        refs = [r.strip() for r in ref_content.split(",")]
+        refs = [_strip_chunk_suffix(r.strip()) for r in ref_content.split(",")]
         numbers = []
-        
+
         for ref in refs:
-            # Try direct match
-            if ref in paper_to_number:
+            # First try the pre-computed mapping
+            if ref in citation_to_number:
+                numbers.append(citation_to_number[ref])
+            # Try direct match in paper_to_number
+            elif ref in paper_to_number:
                 numbers.append(paper_to_number[ref])
             else:
                 # Try to resolve
@@ -164,8 +288,9 @@ def convert_to_ieee_citations(content: str, paper_to_number: Dict[str, int],
             formatted = format_citation_numbers(numbers)
             return f"[{formatted}]"
         else:
-            # Keep original if can't resolve
-            return full_match
+            # Can't resolve - remove the citation markup but keep text indication
+            # This makes unresolved citations visible for debugging
+            return f"[?{ref_content}]"
     
     # Replace [@paper_id:chunk_id] patterns
     content = re.sub(r'\[@([^\]]+)\]', replace_citation, content)
@@ -221,19 +346,27 @@ def generate_numbered_references(paper_to_number: Dict[str, int],
                                   papers: Dict[str, Paper]) -> str:
     """Generate IEEE-style numbered reference list."""
     if not paper_to_number:
-        return ""
+        # If no citations were resolved, generate references from all papers
+        # This is a fallback to ensure we don't have an empty reference section
+        if papers:
+            references = []
+            for i, (paper_id, paper) in enumerate(papers.items(), 1):
+                ref_text = format_ieee_reference(paper, i)
+                references.append(ref_text)
+            return "\n\n".join(references[:20])  # Limit to 20 references
+        return "*No references available.*"
     
-    # Sort by citation number
     sorted_papers = sorted(paper_to_number.items(), key=lambda x: x[1])
-    
+
     references = []
     for paper_id, number in sorted_papers:
         paper = papers.get(paper_id)
         if paper:
             ref_text = format_ieee_reference(paper, number)
-            references.append(ref_text)
-    
-    return "\n\n".join(references)
+            if ref_text:
+                references.append(ref_text)
+
+    return "\n\n".join(references) if references else "*No references available.*"
 
 
 def format_ieee_reference(paper: Paper, number: int) -> str:
@@ -268,98 +401,39 @@ def format_ieee_reference(paper: Paper, number: int) -> str:
     # DOI or URL
     if paper.doi:
         parts.append(f"DOI: {paper.doi}")
-    elif paper.arxiv_id:
-        parts.append(f"Available: https://arxiv.org/abs/{paper.arxiv_id}")
     
     return " ".join(parts)
 
 
-def generate_citekey(paper: Paper) -> str:
-    """Generate a citation key for a paper (for BibTeX compatibility)."""
-    first_author = ""
-    if paper.authors:
-        first_author_full = paper.authors[0]
-        parts = first_author_full.split()
-        first_author = parts[-1] if parts else "Unknown"
-        first_author = re.sub(r'[^a-zA-Z]', '', first_author)
+def format_placeholder_reference(citation_text: str, number: int) -> str:
+    """Format a placeholder reference for unresolved citations."""
+    # Try to extract useful info from the citation text
+    # Common patterns: arxiv:1706.03762, doi:10.xxxx, author2020keyword
+    
+    parts = [f"[{number}]"]
+    
+    if "arxiv:" in citation_text.lower():
+        # Extract arxiv ID
+        arxiv_id = citation_text.lower().replace("arxiv:", "").strip()
+        parts.append(f"*arXiv preprint arXiv:{arxiv_id}*")
+        parts.append(f"(https://arxiv.org/abs/{arxiv_id})")
+    elif "doi:" in citation_text.lower():
+        doi = citation_text.replace("doi:", "").strip()
+        parts.append(f"DOI: {doi}")
     else:
-        first_author = "Unknown"
-    
-    year = paper.year or "XXXX"
-    
-    title_word = ""
-    if paper.title:
-        words = paper.title.split()
-        for word in words:
-            if len(word) > 3 and word.lower() not in ["the", "and", "for", "with"]:
-                title_word = re.sub(r'[^a-zA-Z]', '', word)
-                break
-    
-    return f"{first_author}{year}{title_word}".lower()
-
-
-def generate_bibtex(paper: Paper, citekey: str) -> str:
-    """Generate BibTeX entry for a paper."""
-    if paper.arxiv_id:
-        entry_type = "article"
-        venue = "arXiv preprint arXiv:" + paper.arxiv_id
-    elif paper.venue:
-        if any(conf in paper.venue.lower() for conf in ["conference", "proceedings", "workshop", "acl", "emnlp", "neurips", "icml"]):
-            entry_type = "inproceedings"
-            venue = paper.venue
+        # Try to parse author-year format like "vaswani2017attention"
+        import re
+        match = re.match(r'([a-z]+)(\d{4})([a-z]*)', citation_text.lower())
+        if match:
+            author = match.group(1).capitalize()
+            year = match.group(2)
+            keyword = match.group(3) if match.group(3) else ""
+            parts.append(f"{author} et al., {year}.")
+            if keyword:
+                parts.append(f"(Reference: {citation_text})")
         else:
-            entry_type = "article"
-            venue = paper.venue
-    else:
-        entry_type = "misc"
-        venue = ""
+            parts.append(f"Reference: {citation_text}")
     
-    lines = [f"@{entry_type}{{{citekey},"]
-    lines.append(f'  title = {{{escape_bibtex(paper.title)}}},')
-    
-    if paper.authors:
-        authors_str = " and ".join(paper.authors)
-        lines.append(f'  author = {{{escape_bibtex(authors_str)}}},')
-    
-    if paper.year:
-        lines.append(f'  year = {{{paper.year}}},')
-    
-    if venue:
-        if entry_type == "inproceedings":
-            lines.append(f'  booktitle = {{{escape_bibtex(venue)}}},')
-        else:
-            lines.append(f'  journal = {{{escape_bibtex(venue)}}},')
-    
-    if paper.doi:
-        lines.append(f'  doi = {{{paper.doi}}},')
-    
-    if paper.arxiv_id:
-        lines.append(f'  eprint = {{{paper.arxiv_id}}},')
-        lines.append('  archiveprefix = {arXiv},')
-    
-    url = paper.get_primary_url()
-    if url:
-        lines.append(f'  url = {{{url}}},')
-    
-    lines.append("}")
-    
-    return "\n".join(lines)
+    return " ".join(parts)
 
 
-def escape_bibtex(text: str) -> str:
-    """Escape special characters for BibTeX."""
-    if not text:
-        return ""
-    
-    replacements = [
-        ("&", r"\&"),
-        ("%", r"\%"),
-        ("_", r"\_"),
-        ("#", r"\#"),
-    ]
-    
-    result = text
-    for old, new in replacements:
-        result = result.replace(old, new)
-    
-    return result

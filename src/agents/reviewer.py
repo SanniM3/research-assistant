@@ -5,7 +5,7 @@ import uuid
 
 from ..models.state import ResearchState
 from ..models.issue import Issue, IssueSeverity, IssueCategory, IssueStatus
-from .base import get_llm, create_agent_message
+from .base import get_llm, create_agent_message, parse_llm_json
 
 
 def reviewer_node(state: ResearchState) -> Dict[str, Any]:
@@ -41,21 +41,39 @@ def reviewer_node(state: ResearchState) -> Dict[str, Any]:
     # Merge issues
     all_issues = list(state.issues) + new_issues
     
-    # Determine if revision is needed
-    blocking_issues = [i for i in all_issues 
+    # Determine next step based on issue types
+    blocking_issues = [i for i in all_issues
                        if i.severity == IssueSeverity.BLOCKER and i.status == IssueStatus.OPEN]
-    
-    if blocking_issues and state.iteration < state.max_iterations:
+
+    # Separate research-gap issues from writing-quality issues
+    research_categories = {
+        IssueCategory.MISSING_SEMINAL, IssueCategory.MISSING_RECENT,
+        IssueCategory.BENCHMARK_GAP, IssueCategory.TAXONOMY_GAP,
+        IssueCategory.THIN_COVERAGE, IssueCategory.NEEDS_FOLLOW_UP,
+    }
+    writing_categories = {
+        IssueCategory.STRUCTURAL, IssueCategory.UNSUPPORTED_CLAIM,
+        IssueCategory.MISSING_CITATION, IssueCategory.WEAK_EVIDENCE,
+        IssueCategory.CONTRADICTION,
+    }
+
+    open_research = [i for i in blocking_issues if i.category in research_categories]
+    open_writing = [i for i in blocking_issues if i.category in writing_categories]
+
+    if open_research and state.iteration < state.max_iterations:
         next_phase = "revision"
+    elif open_writing and state.iteration < state.max_iterations:
+        next_phase = "resynthesize"
     else:
         next_phase = "finalize"
-    
+
     state.log_action("reviewer", "completed", {
         "new_issues": len(new_issues),
-        "blocking": len(blocking_issues),
+        "blocking_research": len(open_research),
+        "blocking_writing": len(open_writing),
         "next_phase": next_phase,
     })
-    
+
     return {
         "issues": all_issues,
         "phase": next_phase,
@@ -144,11 +162,11 @@ Output ONLY valid JSON."""
     messages = create_agent_message("reviewer", prompt)
     response = llm.invoke(messages)
     
-    try:
-        return json.loads(response.content)
-    except json.JSONDecodeError:
-        # Return default review on parse failure
-        return {
+    parsed = parse_llm_json(response.content, fallback=None, agent="reviewer")
+    if parsed and isinstance(parsed, dict):
+        return parsed
+
+    return {
             "overall_assessment": "revise",
             "confidence": 3,
             "strengths": ["Survey addresses an important topic"],
@@ -172,7 +190,6 @@ def create_issues_from_review(review: Dict[str, Any], existing_issues: List[Issu
     new_issues = []
     existing_descriptions = {i.description.lower() for i in existing_issues}
     
-    # Category mapping
     category_map = {
         "missing_seminal": IssueCategory.MISSING_SEMINAL,
         "missing_benchmarks": IssueCategory.BENCHMARK_GAP,
@@ -180,6 +197,7 @@ def create_issues_from_review(review: Dict[str, Any], existing_issues: List[Issu
         "structural": IssueCategory.STRUCTURAL,
         "coverage": IssueCategory.THIN_COVERAGE,
         "clarity": IssueCategory.STRUCTURAL,
+        "needs_follow_up": IssueCategory.NEEDS_FOLLOW_UP,
     }
     
     for weakness in review.get("weaknesses", []):
@@ -244,25 +262,3 @@ def create_issues_from_review(review: Dict[str, Any], existing_issues: List[Issu
     return new_issues
 
 
-def generate_revision_tasks(review: Dict[str, Any]) -> List[Dict[str, str]]:
-    """Generate actionable revision tasks from review."""
-    tasks = []
-    
-    for change in review.get("required_changes", []):
-        tasks.append({
-            "type": "revision",
-            "section": change.get("section", "general"),
-            "action": change.get("change", ""),
-            "priority": change.get("priority", "medium"),
-        })
-    
-    for weakness in review.get("weaknesses", []):
-        if weakness.get("severity") in ["blocker", "major"]:
-            tasks.append({
-                "type": "address_weakness",
-                "category": weakness.get("category"),
-                "action": weakness.get("suggested_action", ""),
-                "queries": weakness.get("suggested_queries", []),
-            })
-    
-    return tasks

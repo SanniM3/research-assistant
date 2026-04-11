@@ -1,5 +1,5 @@
 """LangGraph workflow definition for the research assistant."""
-from typing import Literal, Dict, Any
+from typing import Dict, Any
 from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -12,6 +12,7 @@ from ..agents.triage import triage_node
 from ..agents.ingestion import ingestion_node
 from ..agents.extractor import extractor_node
 from ..agents.kb_curator import kb_curator_node
+from ..agents.outline_refiner import outline_refiner_node
 from ..agents.synthesizer import synthesizer_node
 from ..agents.verifier import verifier_node
 from ..agents.gap_scorer import gap_scorer_node
@@ -20,11 +21,15 @@ from ..agents.reviewer import reviewer_node
 
 
 def route_after_orchestrator(state: ResearchState) -> str:
-    """Route based on current phase after orchestrator."""
+    """Route based on current phase after orchestrator.
+    
+    The orchestrator only runs once (at init) so this almost always
+    returns 'planner'.  The other branches exist for resumability.
+    """
     phase = state.phase
     
     if phase == "clarify":
-        return END  # Need user input
+        return END
     elif phase == "planning":
         return "planner"
     elif phase == "search_planning":
@@ -39,7 +44,9 @@ def route_after_orchestrator(state: ResearchState) -> str:
         return "extractor"
     elif phase == "kb_update":
         return "kb_curator"
-    elif phase == "synthesis":
+    elif phase == "outline_refinement":
+        return "outline_refiner"
+    elif phase in ("synthesis", "resynthesize"):
         return "synthesizer"
     elif phase == "verification":
         return "verifier"
@@ -56,15 +63,17 @@ def route_after_orchestrator(state: ResearchState) -> str:
 def route_after_gap_scorer(state: ResearchState) -> str:
     """Route based on gap scoring results."""
     if state.phase == "search_planning":
-        return "search_planner"  # Continue research loop
+        return "search_planner"
     else:
-        return "reviewer"  # Proceed to review
+        return "outline_refiner"
 
 
 def route_after_reviewer(state: ResearchState) -> str:
     """Route based on review results."""
     if state.phase == "revision":
         return "search_planner"  # Need more research
+    elif state.phase == "resynthesize":
+        return "synthesizer"  # Writing quality issues — rewrite sections
     else:
         return "finalizer"
 
@@ -84,6 +93,15 @@ def finalizer_node(state: ResearchState) -> Dict[str, Any]:
         "final_report": final_report,
         "phase": "complete",
     }
+
+
+def _strip_leading_heading(text: str) -> str:
+    """Remove a leading markdown heading (## ...) from synthesizer output."""
+    import re
+    stripped = text.lstrip()
+    # Match lines like "## Title\n" or "# Title\n" at the very start
+    stripped = re.sub(r'^#{1,3}\s+[^\n]*\n+', '', stripped, count=1)
+    return stripped
 
 
 def compile_final_report(state: ResearchState) -> str:
@@ -114,6 +132,9 @@ def compile_final_report(state: ResearchState) -> str:
         parts.append(f"## {section.title}")
         parts.append("")
         content = state.draft_sections.get(section.section_id, "*Section content not available.*")
+        # Strip a leading heading that the synthesizer may have included to
+        # avoid duplicate ## headers in the final report.
+        content = _strip_leading_heading(content)
         parts.append(content)
         parts.append("")
     
@@ -160,13 +181,17 @@ def generate_abstract(state: ResearchState) -> str:
     
     llm = get_llm()
     
-    # Get intro and conclusion content
-    intro = state.draft_sections.get("sec_1", "")[:1000]
+    # Find intro and conclusion by title, not hardcoded ID
+    intro = ""
     conclusion = ""
     for section in state.outline:
-        if "conclusion" in section.title.lower():
+        title_lower = section.title.lower()
+        if "introduction" in title_lower and not intro:
+            intro = state.draft_sections.get(section.section_id, "")[:1000]
+        if "conclusion" in title_lower:
             conclusion = state.draft_sections.get(section.section_id, "")[:1000]
-            break
+    if not intro and state.outline:
+        intro = state.draft_sections.get(state.outline[0].section_id, "")[:1000]
     
     prompt = f"""Write a concise academic abstract (150-250 words) for this survey.
 
@@ -212,6 +237,7 @@ def create_research_workflow() -> StateGraph:
     workflow.add_node("ingestion", ingestion_node)
     workflow.add_node("extractor", extractor_node)
     workflow.add_node("kb_curator", kb_curator_node)
+    workflow.add_node("outline_refiner", outline_refiner_node)
     workflow.add_node("synthesizer", synthesizer_node)
     workflow.add_node("verifier", verifier_node)
     workflow.add_node("gap_scorer", gap_scorer_node)
@@ -236,6 +262,7 @@ def create_research_workflow() -> StateGraph:
             "ingestion": "ingestion",
             "extractor": "extractor",
             "kb_curator": "kb_curator",
+            "outline_refiner": "outline_refiner",
             "synthesizer": "synthesizer",
             "verifier": "verifier",
             "gap_scorer": "gap_scorer",
@@ -252,29 +279,33 @@ def create_research_workflow() -> StateGraph:
     workflow.add_edge("triage", "ingestion")
     workflow.add_edge("ingestion", "extractor")
     workflow.add_edge("extractor", "kb_curator")
-    workflow.add_edge("kb_curator", "synthesizer")
-    workflow.add_edge("synthesizer", "verifier")
-    workflow.add_edge("verifier", "gap_scorer")
-    
-    # Gap scorer can loop back or proceed
+    workflow.add_edge("kb_curator", "gap_scorer")
+
+    # Gap scorer: loop back for more research, or proceed to outline refinement
     workflow.add_conditional_edges(
         "gap_scorer",
         route_after_gap_scorer,
         {
             "search_planner": "search_planner",
-            "reviewer": "citation_manager",
+            "outline_refiner": "outline_refiner",
         }
     )
+
+    # After outline is finalized: synthesize, verify, then review
+    workflow.add_edge("outline_refiner", "synthesizer")
+    workflow.add_edge("synthesizer", "verifier")
     
-    # Citation manager -> Reviewer
+    # Verifier -> Citation manager -> Reviewer
+    workflow.add_edge("verifier", "citation_manager")
     workflow.add_edge("citation_manager", "reviewer")
     
-    # Reviewer can loop back or finalize
+    # Reviewer can loop back for research, rewrite sections, or finalize
     workflow.add_conditional_edges(
         "reviewer",
         route_after_reviewer,
         {
             "search_planner": "search_planner",
+            "synthesizer": "synthesizer",
             "finalizer": "finalizer",
         }
     )
