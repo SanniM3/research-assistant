@@ -19,8 +19,13 @@ def verifier_node(state: ResearchState) -> Dict[str, Any]:
     - Identify contradictions
     - Create Issues for problems
     """
-    llm = get_llm()
-    
+    import re
+    llm = get_llm(role="verifier")
+    kb = state.kb()
+    claims = kb.claims_map()
+    chunks = kb.chunks_map()
+    papers = kb.papers_map()
+
     state.log_action("verifier", "starting", {"sections": len(state.draft_sections)})
     
     issues = list(state.issues)  # Copy existing issues
@@ -28,15 +33,39 @@ def verifier_node(state: ResearchState) -> Dict[str, Any]:
     for section_id, content in state.draft_sections.items():
         section = state.get_section_by_id(section_id)
         section_title = section.title if section else section_id
-        
-        # Check for grounding issues
+        min_citations = section.min_claims if section else 3
+
+        # Structural grounding gate: a section with far too few citations is a
+        # blocking writing issue that should trigger a resynthesis.
+        citation_count = len(re.findall(r"\[@[^\]]+\]", content))
+        if citation_count == 0 and len(content) > 200:
+            issues.append(Issue(
+                issue_id=f"issue_{uuid.uuid4().hex[:8]}",
+                severity=IssueSeverity.BLOCKER,
+                category=IssueCategory.UNSUPPORTED_CLAIM,
+                description=f"Section '{section_title}' has no citations at all",
+                linked_section=section_id,
+                status=IssueStatus.OPEN,
+                created_by="verifier_agent",
+            ))
+        elif 0 < citation_count < min_citations:
+            issues.append(Issue(
+                issue_id=f"issue_{uuid.uuid4().hex[:8]}",
+                severity=IssueSeverity.MAJOR,
+                category=IssueCategory.WEAK_EVIDENCE,
+                description=f"Section '{section_title}' has only {citation_count} citations (min {min_citations})",
+                linked_section=section_id,
+                status=IssueStatus.OPEN,
+                created_by="verifier_agent",
+            ))
+
         section_issues = verify_section_grounding(
             section_id=section_id,
             section_title=section_title,
             content=content,
-            claims=state.claims,
-            chunks=state.chunks,
-            papers=state.papers_ingested,
+            claims=claims,
+            chunks=chunks,
+            papers=papers,
             llm=llm
         )
         
@@ -45,10 +74,11 @@ def verifier_node(state: ResearchState) -> Dict[str, Any]:
         state.log_action("verifier", "section_verified", {
             "section_id": section_id,
             "issues_found": len(section_issues),
+            "citations": citation_count,
         })
     
     # Check for claim-level issues
-    claim_issues = verify_claims(state.claims, state.chunks)
+    claim_issues = verify_claims(claims, chunks)
     issues.extend(claim_issues)
     
     # Deduplicate issues
@@ -57,7 +87,13 @@ def verifier_node(state: ResearchState) -> Dict[str, Any]:
     return {
         "issues": issues,
         "phase": "verification",
+        "estimated_cost_usd": _cost(),
     }
+
+
+def _cost() -> float:
+    from .base import get_cost
+    return round(get_cost().get("usd", 0.0), 4)
 
 
 def verify_section_grounding(section_id: str, section_title: str, content: str,

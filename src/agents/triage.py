@@ -17,13 +17,13 @@ def triage_node(state: ResearchState) -> Dict[str, Any]:
     - Tag papers with metadata
     - Select papers for full-text ingestion
     """
-    llm = get_llm()
+    llm = get_llm(role="triage")
     
     state.log_action("triage", "screening_papers", {"count": len(state.candidate_papers)})
     
     # Get papers not yet triaged
     already_selected = set(state.selected_papers)
-    already_ingested = set(state.papers_ingested.keys())
+    already_ingested = set(state.kb().papers_map().keys())
     papers_to_triage = [
         p for p in state.candidate_papers 
         if p.paper_id not in already_selected and p.paper_id not in already_ingested

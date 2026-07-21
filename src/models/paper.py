@@ -72,10 +72,11 @@ class Paper(BaseModel):
     def generate_paper_id(cls, doi: Optional[str] = None, arxiv_id: Optional[str] = None, 
                           title: Optional[str] = None) -> str:
         """Generate a stable paper ID from available identifiers."""
-        if doi:
-            return f"doi:{doi}"
+        
         if arxiv_id:
             return f"arxiv:{arxiv_id}"
+        if doi:
+            return f"doi:{doi}"
         if title:
             # Normalize title and create hash
             normalized = title.lower().strip()

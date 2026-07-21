@@ -1,108 +1,111 @@
-"""Ingestion agent - fetches and processes full paper content."""
-from typing import Dict, Any, List
+"""Ingestion agent - fetches and processes full paper content into the KB."""
+import time
+from typing import Dict, Any, List, Tuple
 
 from ..models.state import ResearchState
 from ..models.paper import Paper
 from ..models.chunk import Chunk, SourceType
 from ..tools.document_loaders import load_pdf, load_arxiv_html, load_html, DocumentLoadError
-from ..tools.chunking import chunk_document, chunk_text, chunk_with_sections
+from ..tools.chunking import chunk_document, chunk_text, chunk_with_sections, detect_language
+from ..utils.logging import get_logger
+
+_logger = get_logger("ingestion")
 
 
 def ingestion_node(state: ResearchState) -> Dict[str, Any]:
     """
-    Ingestion node - fetches full text and creates chunks.
-    
-    Responsibilities:
-    - Fetch HTML + PDF for selected papers
-    - Parse and extract text
-    - Chunk content for retrieval
-    - Store with provenance metadata
+    Ingestion node - fetches full text, creates chunks, and writes them to the
+    persistent knowledge base (which also embeds new chunks for RAG).
+
+    Papers that only yield an abstract are recorded with
+    ``ingestion_status="abstract_only"`` so they are NOT counted as fully
+    reviewed and do not inflate coverage statistics.
     """
+    kb = state.kb()
     state.log_action("ingestion", "starting", {"selected_count": len(state.selected_papers)})
-    
-    # Get papers that need ingestion
+
+    selected = set(state.selected_papers)
     papers_to_ingest = [
-        p for p in state.candidate_papers 
-        if p.paper_id in state.selected_papers and p.paper_id not in state.papers_ingested
+        p for p in state.candidate_papers
+        if p.paper_id in selected and kb.get_paper(p.paper_id) is None
     ]
-    
+
     if not papers_to_ingest:
         return {"phase": "extraction"}
-    
-    new_chunks = dict(state.chunks)
-    new_ingested = dict(state.papers_ingested)
-    
-    for paper in papers_to_ingest[:10]:  # Limit per iteration
+
+    batch = papers_to_ingest[:10]  # bound work per iteration
+    total = len(batch)
+    _logger.info("Ingesting %d paper(s) (downloading full text + embedding chunks)...", total)
+
+    for idx, paper in enumerate(batch, 1):
+        t0 = time.time()
+        _logger.info("  [%d/%d] fetching %s - %.60s", idx, total, paper.paper_id, paper.title or "")
         try:
-            chunks = ingest_paper(paper)
-            
+            chunks, status = ingest_paper(paper)
+
             if chunks:
-                # Store chunks
-                for chunk in chunks:
-                    new_chunks[chunk.chunk_id] = chunk
-                
-                # Mark paper as ingested
+                kb.upsert_chunks(chunks)
+                _logger.info("  [%d/%d] done %s: %d chunks (%s) in %.1fs",
+                             idx, total, paper.paper_id, len(chunks), status, time.time() - t0)
                 paper.is_ingested = True
-                paper.ingestion_status = "complete"
-                new_ingested[paper.paper_id] = paper
-                
+                paper.ingestion_status = status
+                paper.language = chunks[0].metadata.language or paper.language
+                kb.upsert_paper(paper)
+
                 state.log_action("ingestion", "paper_ingested", {
                     "paper_id": paper.paper_id,
                     "chunk_count": len(chunks),
+                    "status": status,
                 })
             else:
                 paper.ingestion_status = "failed"
+                kb.upsert_paper(paper)
+                _logger.warning("  [%d/%d] no full text for %s", idx, total, paper.paper_id)
                 state.log_action("ingestion", "paper_failed", {
                     "paper_id": paper.paper_id,
                     "reason": "no_chunks_extracted",
                 })
-                
+
         except Exception as e:
             paper.ingestion_status = "error"
+            _logger.warning("  [%d/%d] error ingesting %s: %s", idx, total, paper.paper_id, e)
             state.log_action("ingestion", "paper_error", {
                 "paper_id": paper.paper_id,
                 "error": str(e),
             })
-    
-    return {
-        "chunks": new_chunks,
-        "papers_ingested": new_ingested,
-        "phase": "extraction",
-    }
+
+    return {"phase": "extraction"}
 
 
-def ingest_paper(paper: Paper) -> List[Chunk]:
+def ingest_paper(paper: Paper) -> Tuple[List[Chunk], str]:
     """
-    Ingest a single paper, trying multiple sources.
-    
-    Priority:
-    1. arXiv HTML (best structure)
-    2. PDF (most complete)
-    3. Web HTML (fallback)
+    Ingest a single paper, trying multiple full-text sources before falling back
+    to the abstract.
+
+    Returns (chunks, status) where status is "complete" for real full text and
+    "abstract_only" when only the abstract was available.
     """
-    chunks = []
-    
-    # Try arXiv HTML first
+    # Try arXiv HTML first (best structure)
     if paper.arxiv_id:
         chunks = try_arxiv_html_ingestion(paper)
         if chunks:
-            return chunks
+            return _finalise(chunks), "complete"
 
     # Try PDF
     pdf_url = paper.get_pdf_url()
     if pdf_url:
         chunks = try_pdf_ingestion(paper, pdf_url)
         if chunks:
-            return chunks
+            return _finalise(chunks), "complete"
 
     # Try web HTML as fallback
     for url in paper.url_list:
         if url and not url.endswith(".pdf"):
             chunks = try_html_ingestion(paper, url)
             if chunks:
-                return chunks
-    
-    # If all else fails, use abstract
+                return _finalise(chunks), "complete"
+
+    # Last resort: abstract only
     if paper.abstract:
         chunk = Chunk.create(
             paper_id=paper.paper_id,
@@ -110,8 +113,18 @@ def ingest_paper(paper: Paper) -> List[Chunk]:
             source_type=SourceType.WEB_HTML,
             section_path="Abstract",
         )
-        chunks = [chunk]
-    
+        return _finalise([chunk]), "abstract_only"
+
+    return [], "failed"
+
+
+def _finalise(chunks: List[Chunk]) -> List[Chunk]:
+    """Tag each chunk with a detected language for cross-lingual retrieval."""
+    for chunk in chunks:
+        try:
+            chunk.metadata.language = detect_language(chunk.text)
+        except Exception:
+            pass
     return chunks
 
 
@@ -119,7 +132,6 @@ def try_arxiv_html_ingestion(paper: Paper) -> List[Chunk]:
     """Try to ingest from arXiv HTML."""
     if not paper.arxiv_id:
         return []
-    
     try:
         text, metadata = load_arxiv_html(paper.arxiv_id)
         if text and len(text) > 100:
@@ -132,7 +144,6 @@ def try_arxiv_html_ingestion(paper: Paper) -> List[Chunk]:
         pass
     except Exception as e:
         print(f"arXiv HTML ingestion error for {paper.arxiv_id}: {e}")
-    
     return []
 
 
@@ -150,7 +161,6 @@ def try_pdf_ingestion(paper: Paper, pdf_url: str) -> List[Chunk]:
         pass
     except Exception as e:
         print(f"PDF ingestion error for {paper.paper_id}: {e}")
-    
     return []
 
 
@@ -168,5 +178,4 @@ def try_html_ingestion(paper: Paper, url: str) -> List[Chunk]:
         pass
     except Exception as e:
         print(f"HTML ingestion error for {paper.paper_id}: {e}")
-    
     return []

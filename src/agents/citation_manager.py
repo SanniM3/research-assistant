@@ -34,61 +34,40 @@ def citation_manager_node(state: ResearchState) -> Dict[str, Any]:
     - Generate numbered reference list
     - Validate citation completeness
     """
-    state.log_action("citation_manager", "starting", {
-        "papers": len(state.papers_ingested)
-    })
+    papers = state.kb().papers_map()
+    state.log_action("citation_manager", "starting", {"papers": len(papers)})
     
     # First pass: collect all cited paper IDs from draft sections
     all_content = "\n".join(state.draft_sections.values())
-    cited_paper_ids, citation_mapping = extract_cited_paper_ids(all_content, state.papers_ingested)
+    cited_paper_ids, citation_mapping = extract_cited_paper_ids(all_content, papers)
     
-    # Collect unresolved citations for placeholder handling
+    # Collect unresolved citations (these will be dropped, never faked)
     unresolved = [k for k, v in citation_mapping.items() if v is None]
     
-    # If no citations were resolved, include all ingested papers as potential references
-    if not cited_paper_ids and state.papers_ingested:
-        cited_paper_ids = list(state.papers_ingested.keys())
+    # If no citations were resolved, include all reviewed papers as references
+    if not cited_paper_ids and papers:
+        cited_paper_ids = list(papers.keys())
     
     # Assign citation numbers (in order of first appearance)
     paper_to_number, citation_to_number = assign_citation_numbers(
-        cited_paper_ids, citation_mapping, state.draft_sections, state.papers_ingested
+        cited_paper_ids, citation_mapping, state.draft_sections, papers
     )
     
-    # Handle unresolved citations - assign them numbers and create placeholder references
-    unresolved_refs = {}
-    if unresolved:
-        next_number = max(paper_to_number.values()) + 1 if paper_to_number else 1
-        for citation_text in unresolved:
-            if citation_text not in citation_to_number:
-                citation_to_number[citation_text] = next_number
-                unresolved_refs[citation_text] = next_number
-                next_number += 1
-    
-    # Update draft sections with numbered citations
+    # Update draft sections with numbered citations (unresolved refs removed)
     updated_drafts = {}
     for section_id, content in state.draft_sections.items():
         updated_content = convert_to_ieee_citations(
-            content, paper_to_number, citation_to_number, state.papers_ingested
+            content, paper_to_number, citation_to_number, papers
         )
         updated_drafts[section_id] = updated_content
     
-    # Generate numbered reference list (resolved papers)
-    references = generate_numbered_references(paper_to_number, state.papers_ingested)
-    
-    # Add placeholder references for unresolved citations
-    if unresolved_refs:
-        placeholder_refs = []
-        for citation_text, number in sorted(unresolved_refs.items(), key=lambda x: x[1]):
-            placeholder_refs.append(format_placeholder_reference(citation_text, number))
-        if placeholder_refs:
-            if references:
-                references += "\n\n" + "\n\n".join(placeholder_refs)
-            else:
-                references = "\n\n".join(placeholder_refs)
+    # Generate numbered reference list (resolved papers only)
+    references = generate_numbered_references(paper_to_number, papers)
     
     if unresolved:
-        state.log_action("citation_manager", "unresolved_citations", {
-            "unresolved": unresolved[:10]  # Log first 10
+        state.log_action("citation_manager", "unresolved_citations_dropped", {
+            "count": len(unresolved),
+            "sample": unresolved[:10],
         })
     
     # Store as bib_entries — serialize paper_to_number as a JSON string to
@@ -100,7 +79,7 @@ def citation_manager_node(state: ResearchState) -> Dict[str, Any]:
     
     state.log_action("citation_manager", "completed", {
         "citations_resolved": len(paper_to_number),
-        "citations_unresolved": len(unresolved_refs)
+        "citations_unresolved": len(unresolved),
     })
     
     return {
@@ -161,49 +140,28 @@ def normalize_arxiv_id(arxiv_id: str) -> str:
 
 
 def resolve_paper_id(ref: str, papers: Dict[str, Paper]) -> Optional[str]:
-    """Resolve a reference to an actual paper ID."""
+    """Resolve a citation reference to a paper ID by EXACT / normalized id only.
+
+    Fuzzy substring and title-keyword matching were removed deliberately: they
+    routinely misattributed citations to the wrong paper, which is fatal for a
+    system whose value is correct grounding. The synthesizer cites from a closed
+    set of paper ids, so exact/normalized-id resolution is sufficient; anything
+    that does not resolve is dropped rather than guessed.
+    """
     # Direct match
     if ref in papers:
         return ref
-    
-    # Normalize the reference for comparison
+
+    # Normalized arXiv id match (handles arxiv: prefix and version suffixes)
     ref_normalized = normalize_arxiv_id(ref)
-    
-    # Try matching by normalized arxiv ID
+    if not ref_normalized:
+        return None
     for paper_id, paper in papers.items():
-        # Check paper_id itself
-        paper_id_normalized = normalize_arxiv_id(paper_id)
-        if ref_normalized and paper_id_normalized and ref_normalized == paper_id_normalized:
+        if normalize_arxiv_id(paper_id) == ref_normalized:
             return paper_id
-        
-        # Check paper's arxiv_id field
-        if paper.arxiv_id:
-            paper_arxiv_normalized = normalize_arxiv_id(paper.arxiv_id)
-            if ref_normalized and paper_arxiv_normalized == ref_normalized:
-                return paper_id
-    
-    # Try partial matching (ref contains paper_id or vice versa)
-    for paper_id in papers:
-        if ref in paper_id or paper_id in ref:
+        if paper.arxiv_id and normalize_arxiv_id(paper.arxiv_id) == ref_normalized:
             return paper_id
-    
-    # Try matching by citekey-like format (author year)
-    ref_lower = ref.lower()
-    for paper_id, paper in papers.items():
-        if paper.authors and paper.year:
-            first_author_last = paper.authors[0].split()[-1].lower()
-            if first_author_last in ref_lower and str(paper.year) in ref:
-                return paper_id
-    
-    # Try matching by title keywords (last resort)
-    ref_words = set(ref_lower.replace("_", " ").replace("-", " ").split())
-    if len(ref_words) >= 2:
-        for paper_id, paper in papers.items():
-            if paper.title:
-                title_words = set(paper.title.lower().split())
-                if len(ref_words & title_words) >= 2:
-                    return paper_id
-    
+
     return None
 
 
@@ -288,9 +246,9 @@ def convert_to_ieee_citations(content: str, paper_to_number: Dict[str, int],
             formatted = format_citation_numbers(numbers)
             return f"[{formatted}]"
         else:
-            # Can't resolve - remove the citation markup but keep text indication
-            # This makes unresolved citations visible for debugging
-            return f"[?{ref_content}]"
+            # Can't resolve - drop the citation marker cleanly rather than
+            # leaving debugging noise or fabricating a reference.
+            return ""
     
     # Replace [@paper_id:chunk_id] patterns
     content = re.sub(r'\[@([^\]]+)\]', replace_citation, content)

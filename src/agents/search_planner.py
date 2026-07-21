@@ -18,7 +18,7 @@ def search_planner_node(state: ResearchState) -> Dict[str, Any]:
     - Create multilingual variants if needed
     - Plan gap-filling queries based on issues
     """
-    llm = get_llm()
+    llm = get_llm(role="search_planner")
     
     state.log_action("search_planner", "generating_queries", {"iteration": state.iteration})
     
@@ -34,13 +34,23 @@ def search_planner_node(state: ResearchState) -> Dict[str, Any]:
         IssueCategory.NEEDS_FOLLOW_UP,
     ]]
     
-    # Build context about what we already have
-    ingested_titles = [p.title for p in state.papers_ingested.values()][:20]
+    # Build context about what we already have (from the persistent KB)
+    ingested_titles = [p.title for p in state.kb().all_papers()][:20]
+
+    lang = (state.output_language or "en").lower()
+    multilingual_note = ""
+    if lang != "en":
+        multilingual_note = (
+            f"\nMULTILINGUAL: The survey output language is '{lang}'. In addition to "
+            f"English queries, include 1-2 arXiv/web queries using the key technical "
+            f"terms in '{lang}' so non-English literature is also discovered.\n"
+        )
     
     prompt = f"""Generate search queries for academic research on:
 
 TOPIC: {state.topic}
 SCOPE: {state.scope}
+OUTPUT LANGUAGE: {lang}{multilingual_note}
 
 RESEARCH QUESTIONS (open/partially answered):
 {json.dumps([{"id": q.question_id, "text": q.text, "status": q.status.value} for q in state.get_open_questions()], indent=2)}

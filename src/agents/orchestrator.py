@@ -16,7 +16,9 @@ def orchestrator_node(state: ResearchState) -> Dict[str, Any]:
     phase transitions and iteration decisions are handled by the individual
     agent nodes (gap_scorer, reviewer) and the graph's conditional edges.
     """
-    llm = get_llm()
+    from ..storage.registry import derive_corpus_id
+
+    llm = get_llm(role="orchestrator")
 
     state.log_action("orchestrator", "processing", {
         "phase": state.phase, "iteration": state.iteration,
@@ -24,6 +26,8 @@ def orchestrator_node(state: ResearchState) -> Dict[str, Any]:
 
     if state.phase != "init":
         return {}
+
+    corpus_id = state.corpus_id or derive_corpus_id(state.topic)
 
     if not state.topic or len(state.topic.strip()) < 10:
         prompt = f"""The user has provided a research topic: "{state.topic}"
@@ -44,9 +48,11 @@ If clarification is needed, respond with: CLARIFY: [your question]"""
                     content=response.content.replace("CLARIFY:", "").strip()
                 )],
                 "phase": "clarify",
+                "corpus_id": corpus_id,
             }
 
     return {
         "phase": "planning",
         "iteration": 0,
+        "corpus_id": corpus_id,
     }

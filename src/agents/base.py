@@ -1,7 +1,7 @@
 """Base agent utilities and prompts."""
 import json
 import re
-from typing import Optional, Any
+from typing import Optional, Any, List, Dict
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -11,13 +11,187 @@ from ..utils.logging import get_logger
 _logger = get_logger("agents.base")
 
 
-def get_llm(temperature: Optional[float] = None) -> ChatOpenAI:
-    """Get configured LLM instance."""
+# ---------------------------------------------------------------------------
+# Model tiering (cost control)
+# ---------------------------------------------------------------------------
+# Roles whose output quality materially affects the survey use the (more
+# expensive) synthesis model; high-volume screening/extraction roles use the
+# cheaper extraction model.  Change the mapping here, or the models in settings.
+EXPENSIVE_ROLES = {
+    "planner", "outline_refiner", "synthesizer", "synthesizer_coherence", "reviewer",
+}
+
+
+def _model_for_role(role: Optional[str]) -> str:
     settings = get_settings()
-    return ChatOpenAI(
-        model=settings.llm_model,
+    if role in EXPENSIVE_ROLES:
+        return settings.synthesis_model
+    if role:  # any other named agent role -> cheap tier
+        return settings.extraction_model
+    return settings.llm_model
+
+
+# ---------------------------------------------------------------------------
+# Cost tracking + soft budget guardrail
+# ---------------------------------------------------------------------------
+# Approximate USD per 1M tokens (input, output).  Used only for a soft guardrail
+# and reporting; not billing-accurate.
+MODEL_PRICES: Dict[str, tuple] = {
+    "gpt-4o": (2.5, 10.0),
+    "gpt-4o-mini": (0.15, 0.6),
+    "gpt-4.1": (2.0, 8.0),
+    "gpt-4.1-mini": (0.4, 1.6),
+    "text-embedding-3-small": (0.02, 0.0),
+    "text-embedding-3-large": (0.13, 0.0),
+}
+
+_COST: Dict[str, float] = {"usd": 0.0, "calls": 0.0, "budget_hit": 0.0}
+
+
+def reset_cost() -> None:
+    """Reset the per-run cost accumulator."""
+    _COST["usd"] = 0.0
+    _COST["calls"] = 0.0
+    _COST["budget_hit"] = 0.0
+
+
+def get_cost() -> Dict[str, float]:
+    """Return the accumulated estimated cost for the current run."""
+    return dict(_COST)
+
+
+def budget_exceeded() -> bool:
+    """True when the soft cost cap has been exceeded (0 disables the cap)."""
+    cap = get_settings().max_run_cost_usd
+    return cap > 0 and _COST["usd"] >= cap
+
+
+def _price(model: str) -> tuple:
+    for key, price in MODEL_PRICES.items():
+        if model.startswith(key):
+            return price
+    return (2.5, 10.0)  # default to gpt-4o-ish pricing
+
+
+def record_cost(model: str, input_tokens: int, output_tokens: int) -> None:
+    """Record estimated cost of one model call."""
+    in_price, out_price = _price(model)
+    cost = (input_tokens / 1_000_000) * in_price + (output_tokens / 1_000_000) * out_price
+    _COST["usd"] += cost
+    _COST["calls"] += 1
+    if budget_exceeded() and not _COST["budget_hit"]:
+        _COST["budget_hit"] = 1.0
+        _logger.warning(
+            "Estimated run cost $%.3f exceeded cap $%.2f - agents may downgrade work",
+            _COST["usd"], get_settings().max_run_cost_usd,
+        )
+
+
+def _estimate_tokens_from_messages(messages) -> int:
+    total = 0
+    for m in messages:
+        content = getattr(m, "content", "") or ""
+        total += len(str(content))
+    return total // 4  # ~4 chars per token
+
+
+class TrackedLLM:
+    """Thin wrapper around ChatOpenAI that records estimated token cost.
+
+    Delegates everything else to the underlying model, so existing call sites
+    (``get_llm(...).invoke(messages)``) keep working unchanged.
+    """
+
+    def __init__(self, llm: ChatOpenAI, model: str):
+        self._llm = llm
+        self.model = model
+
+    def invoke(self, messages, *args, **kwargs):
+        response = self._llm.invoke(messages, *args, **kwargs)
+        usage = getattr(response, "usage_metadata", None) or {}
+        in_tok = usage.get("input_tokens") or _estimate_tokens_from_messages(messages)
+        out_tok = usage.get("output_tokens")
+        if out_tok is None:
+            out_tok = len(str(getattr(response, "content", ""))) // 4
+        record_cost(self.model, in_tok, out_tok)
+        return response
+
+    def __getattr__(self, name):  # pragma: no cover - passthrough
+        return getattr(self._llm, name)
+
+
+def get_llm(temperature: Optional[float] = None, role: Optional[str] = None) -> TrackedLLM:
+    """Get a cost-tracked LLM instance for the given agent role.
+
+    The concrete model is chosen by role via the tiering in ``_model_for_role``
+    (expensive model for generative roles, cheap model for extraction/screening).
+    """
+    settings = get_settings()
+    model = _model_for_role(role)
+    llm = ChatOpenAI(
+        model=model,
         temperature=temperature if temperature is not None else settings.llm_temperature,
     )
+    return TrackedLLM(llm, model)
+
+
+# ---------------------------------------------------------------------------
+# Embeddings (for RAG). Degrades gracefully when unavailable.
+# ---------------------------------------------------------------------------
+_EMBEDDINGS = None
+_EMBEDDINGS_FAILED = False
+
+
+def get_embedder():
+    """Return a cached OpenAIEmbeddings instance, or None if unavailable."""
+    global _EMBEDDINGS, _EMBEDDINGS_FAILED
+    if _EMBEDDINGS_FAILED:
+        return None
+    if _EMBEDDINGS is None:
+        try:
+            from langchain_openai import OpenAIEmbeddings
+            _EMBEDDINGS = OpenAIEmbeddings(model=get_settings().embedding_model)
+        except Exception as exc:  # pragma: no cover
+            _logger.warning("Embeddings unavailable (%s); RAG falls back to keyword search", exc)
+            _EMBEDDINGS_FAILED = True
+            return None
+    return _EMBEDDINGS
+
+
+def embed_texts(texts: List[str]) -> Optional[List[List[float]]]:
+    """Embed a list of texts in batches. Returns None on failure (callers fall back)."""
+    global _EMBEDDINGS_FAILED
+    if not texts:
+        return []
+    embedder = get_embedder()
+    if embedder is None:
+        return None
+    settings = get_settings()
+    batch = max(1, settings.embedding_batch_size)
+    vectors: List[List[float]] = []
+    try:
+        for i in range(0, len(texts), batch):
+            chunk = texts[i:i + batch]
+            vectors.extend(embedder.embed_documents(chunk))
+            record_cost(settings.embedding_model, sum(len(t) for t in chunk) // 4, 0)
+        return vectors
+    except Exception as exc:  # pragma: no cover
+        _logger.warning("Embedding call failed (%s); RAG falls back to keyword search", exc)
+        _EMBEDDINGS_FAILED = True
+        return None
+
+
+def embed_query(text: str) -> Optional[List[float]]:
+    """Embed a single query string. Returns None on failure."""
+    embedder = get_embedder()
+    if embedder is None or not text:
+        return None
+    try:
+        vec = embedder.embed_query(text)
+        record_cost(get_settings().embedding_model, len(text) // 4, 0)
+        return vec
+    except Exception:  # pragma: no cover
+        return None
 
 
 def parse_llm_json(text: str, *, fallback: Any = None, agent: str = "") -> Any:

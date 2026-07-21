@@ -1,163 +1,125 @@
-"""Vector store for semantic search over chunks."""
-from typing import List, Optional, Dict, Any, Tuple
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_core.documents import Document
-import os
+"""Semantic embedding index for RAG retrieval over chunks and claims.
 
-from ..models.chunk import Chunk
-from ..config.settings import get_settings
+This is a lightweight, dependency-robust vector index: embeddings are computed
+via ``agents.base.embed_texts`` (OpenAI) and similarity is brute-force cosine in
+numpy.  At per-corpus scale (hundreds to a few thousand items) this is instant
+and avoids FAISS (de)serialisation fragility, which matters for deployment.
+
+Embeddings are cached by stable item id, so re-runs never re-embed material that
+already exists in the corpus.  The index degrades gracefully: when embeddings
+are unavailable it simply returns no results and callers fall back to keyword
+scoring.
+"""
+from typing import List, Optional, Dict, Any, Tuple, Callable
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover
+    np = None
 
 
-class VectorStore:
-    """
-    Vector store for semantic search over document chunks.
-    
-    Uses FAISS for efficient similarity search with OpenAI embeddings.
-    Provides methods for adding chunks, searching, and managing the index.
-    """
-    
-    def __init__(self, persist_path: Optional[str] = None):
+class EmbeddingIndex:
+    """In-memory cosine-similarity index with an external embed function."""
+
+    def __init__(self, embed_fn: Callable[[List[str]], Optional[List[List[float]]]]):
+        self._embed_fn = embed_fn
+        self._ids: List[str] = []
+        self._row_by_id: Dict[str, int] = {}
+        self._metadata: Dict[str, Dict[str, Any]] = {}
+        self._matrix = None  # np.ndarray (n, dim), L2-normalised rows
+
+    # -- persistence helpers -------------------------------------------------
+
+    def has(self, item_id: str) -> bool:
+        return item_id in self._row_by_id
+
+    def load_vectors(self, vectors: Dict[str, List[float]],
+                     metadata: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+        """Populate the index directly from persisted vectors (no embedding)."""
+        if np is None or not vectors:
+            return
+        rows = []
+        for item_id, vec in vectors.items():
+            if item_id in self._row_by_id:
+                continue
+            self._row_by_id[item_id] = len(self._ids)
+            self._ids.append(item_id)
+            if metadata and item_id in metadata:
+                self._metadata[item_id] = metadata[item_id]
+            rows.append(vec)
+        if rows:
+            new = self._normalise(np.array(rows, dtype="float32"))
+            self._matrix = new if self._matrix is None else np.vstack([self._matrix, new])
+
+    def vectors(self) -> Dict[str, List[float]]:
+        """Return all stored vectors keyed by id (for persistence)."""
+        if np is None or self._matrix is None:
+            return {}
+        return {item_id: self._matrix[row].tolist() for item_id, row in self._row_by_id.items()}
+
+    # -- indexing ------------------------------------------------------------
+
+    def add(self, items: List[Tuple[str, str, Dict[str, Any]]]) -> Dict[str, List[float]]:
+        """Add (id, text, metadata) items, embedding only new ids.
+
+        Returns a mapping of newly-embedded id -> vector (so the caller can
+        persist them). Returns {} when embeddings are unavailable.
         """
-        Initialize the vector store.
-        
-        Args:
-            persist_path: Optional path to persist/load the index
-        """
-        settings = get_settings()
-        self.persist_path = persist_path or settings.vector_store_path
-        self.embeddings = OpenAIEmbeddings(model=settings.embedding_model)
-        self._store: Optional[FAISS] = None
-        self._chunk_metadata: Dict[str, Dict[str, Any]] = {}
-        
-        # Try to load existing index
-        self._load_or_create()
-    
-    def _load_or_create(self) -> None:
-        """Load existing index or create new one."""
-        if self.persist_path and os.path.exists(self.persist_path):
-            try:
-                self._store = FAISS.load_local(
-                    self.persist_path, 
-                    self.embeddings,
-                    allow_dangerous_deserialization=True
-                )
-            except Exception:
-                self._store = None
-    
-    def add_chunks(self, chunks: List[Chunk]) -> List[str]:
-        """
-        Add chunks to the vector store.
-        
-        Args:
-            chunks: List of Chunk objects to add
-            
-        Returns:
-            List of chunk IDs that were added
-        """
-        if not chunks:
+        if np is None:
+            return {}
+        new_items = [(i, t, m) for (i, t, m) in items if i not in self._row_by_id and t]
+        if not new_items:
+            return {}
+        vectors = self._embed_fn([t for (_, t, _) in new_items])
+        if not vectors:
+            return {}
+        rows = []
+        embedded: Dict[str, List[float]] = {}
+        for (item_id, _text, meta), vec in zip(new_items, vectors):
+            self._row_by_id[item_id] = len(self._ids)
+            self._ids.append(item_id)
+            self._metadata[item_id] = meta or {}
+            rows.append(vec)
+            embedded[item_id] = vec
+        new = self._normalise(np.array(rows, dtype="float32"))
+        self._matrix = new if self._matrix is None else np.vstack([self._matrix, new])
+        return embedded
+
+    # -- search --------------------------------------------------------------
+
+    def search(self, query: str, k: int = 10,
+               filters: Optional[Dict[str, Any]] = None) -> List[Tuple[str, float]]:
+        """Return up to k (item_id, score) pairs most similar to the query."""
+        if np is None or self._matrix is None or not self._ids:
             return []
-        
-        # Convert chunks to documents
-        documents = []
-        for chunk in chunks:
-            doc = Document(
-                page_content=chunk.text,
-                metadata={
-                    "chunk_id": chunk.chunk_id,
-                    "paper_id": chunk.paper_id,
-                    "section_path": chunk.section_path,
-                    "source_type": chunk.source_type.value,
-                    "quality": chunk.quality.value,
-                }
-            )
-            documents.append(doc)
-            self._chunk_metadata[chunk.chunk_id] = chunk.model_dump()
-        
-        # Add to vector store
-        if self._store is None:
-            self._store = FAISS.from_documents(documents, self.embeddings)
-        else:
-            self._store.add_documents(documents)
-        
-        return [chunk.chunk_id for chunk in chunks]
-    
-    def search(self, query: str, k: int = 5, 
-               filters: Optional[Dict[str, Any]] = None) -> List[Tuple[Chunk, float]]:
-        """
-        Search for similar chunks.
-        
-        Args:
-            query: Search query
-            k: Number of results to return
-            filters: Optional metadata filters
-            
-        Returns:
-            List of (Chunk, score) tuples
-        """
-        if self._store is None:
+        qvec = self._embed_fn([query])
+        if not qvec:
             return []
-        
-        # Perform similarity search
-        results = self._store.similarity_search_with_score(query, k=k * 2)
-        
-        # Filter and convert to Chunks
-        filtered_results = []
-        for doc, score in results:
-            chunk_id = doc.metadata.get("chunk_id")
-            if chunk_id and chunk_id in self._chunk_metadata:
-                # Apply filters if specified
-                if filters:
-                    chunk_meta = self._chunk_metadata[chunk_id]
-                    if not all(chunk_meta.get(fk) == fv for fk, fv in filters.items()):
-                        continue
-                
-                chunk = Chunk(**self._chunk_metadata[chunk_id])
-                filtered_results.append((chunk, score))
-                
-                if len(filtered_results) >= k:
-                    break
-        
-        return filtered_results
-    
-    def search_by_paper(self, paper_id: str, query: str, k: int = 5) -> List[Tuple[Chunk, float]]:
-        """Search within a specific paper's chunks."""
-        return self.search(query, k=k, filters={"paper_id": paper_id})
-    
-    def get_chunks_for_paper(self, paper_id: str) -> List[Chunk]:
-        """Get all chunks for a specific paper."""
-        chunks = []
-        for chunk_id, metadata in self._chunk_metadata.items():
-            if metadata.get("paper_id") == paper_id:
-                chunks.append(Chunk(**metadata))
-        return chunks
-    
-    def delete_paper_chunks(self, paper_id: str) -> int:
-        """Delete all chunks for a paper. Returns count of deleted chunks."""
-        # Note: FAISS doesn't support deletion well, so we track metadata separately
-        deleted = 0
-        to_delete = []
-        for chunk_id, metadata in self._chunk_metadata.items():
-            if metadata.get("paper_id") == paper_id:
-                to_delete.append(chunk_id)
-                deleted += 1
-        
-        for chunk_id in to_delete:
-            del self._chunk_metadata[chunk_id]
-        
-        return deleted
-    
-    def save(self) -> None:
-        """Persist the vector store to disk."""
-        if self._store and self.persist_path:
-            os.makedirs(os.path.dirname(self.persist_path), exist_ok=True)
-            self._store.save_local(self.persist_path)
-    
+        q = self._normalise(np.array(qvec, dtype="float32"))[0]
+        scores = self._matrix @ q  # cosine (rows already normalised)
+        order = np.argsort(-scores)
+        results: List[Tuple[str, float]] = []
+        for row in order:
+            item_id = self._ids[int(row)]
+            if filters:
+                meta = self._metadata.get(item_id, {})
+                if not all(meta.get(fk) == fv for fk, fv in filters.items()):
+                    continue
+            results.append((item_id, float(scores[int(row)])))
+            if len(results) >= k:
+                break
+        return results
+
+    @staticmethod
+    def _normalise(matrix):
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        return matrix / norms
+
     def count(self) -> int:
-        """Get total number of chunks."""
-        return len(self._chunk_metadata)
-    
-    def clear(self) -> None:
-        """Clear the vector store."""
-        self._store = None
-        self._chunk_metadata.clear()
+        return len(self._ids)
+
+
+# Backwards-compatible alias; the old FAISS-based VectorStore is superseded by
+# EmbeddingIndex, which the KnowledgeBase now uses directly.
+VectorStore = EmbeddingIndex

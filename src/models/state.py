@@ -117,6 +117,11 @@ class ResearchState(BaseModel):
     topic: str = ""
     user_constraints: Optional[str] = None
     output_language: str = "en"
+
+    # Corpus identity: the heavy knowledge (papers/chunks/claims/entities/
+    # relations) lives in a persistent KnowledgeBase keyed by this id, NOT on the
+    # (checkpointed) state. See storage.registry.get_knowledge_base.
+    corpus_id: str = ""
     
     # Scope and planning
     scope: str = ""
@@ -129,21 +134,20 @@ class ResearchState(BaseModel):
     iteration: int = 0
     max_iterations: int = 5
     phase: str = "init"
+    # Bounded retry counters for the synthesis-side loops (prevent thrash).
+    revision_count: int = 0
+    resynth_count: int = 0
+    max_revisions: int = 2
+    max_resynths: int = 2
     
     # Search and retrieval
     queries_run: List[QueryRecord] = Field(default_factory=list)
     pending_queries: List[str] = Field(default_factory=list)
     
-    # Paper management
+    # Paper management (transient working set only; the durable record is the KB).
+    # candidate_papers holds the current retrieval batch until triage prunes it.
     candidate_papers: List[Paper] = Field(default_factory=list)
     selected_papers: List[str] = Field(default_factory=list)
-    papers_ingested: Dict[str, Paper] = Field(default_factory=dict)
-    
-    # Knowledge base
-    chunks: Dict[str, Chunk] = Field(default_factory=dict)
-    claims: Dict[str, Claim] = Field(default_factory=dict)
-    entities: Dict[str, Entity] = Field(default_factory=dict)
-    relations: Dict[str, Relation] = Field(default_factory=dict)
     
     # Draft sections
     draft_sections: Dict[str, str] = Field(default_factory=dict)
@@ -155,6 +159,9 @@ class ResearchState(BaseModel):
     
     # Bibliography and citation tracking
     bib_entries: Dict[str, Any] = Field(default_factory=dict)
+
+    # Cost tracking (estimated USD for LLM + embedding calls this run).
+    estimated_cost_usd: float = 0.0
     
     # Final output
     final_report: str = ""
@@ -180,6 +187,13 @@ class ResearchState(BaseModel):
         if len(self.audit_log) > self._MAX_AUDIT_LOG:
             self.audit_log = self.audit_log[-self._MAX_AUDIT_LOG:]
     
+    def kb(self):
+        """Return the persistent KnowledgeBase for this run's corpus."""
+        from ..storage.registry import get_knowledge_base, derive_corpus_id
+        if not self.corpus_id:
+            self.corpus_id = derive_corpus_id(self.topic)
+        return get_knowledge_base(self.corpus_id)
+
     def get_open_issues(self, severity: Optional[IssueSeverity] = None) -> List[Issue]:
         """Get all open issues, optionally filtered by severity."""
         open_issues = [i for i in self.issues if i.status == IssueStatus.OPEN]

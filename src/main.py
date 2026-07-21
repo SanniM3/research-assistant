@@ -122,31 +122,47 @@ Examples:
             report = "Report generation incomplete."
         
         # Determine output path
-        output_path = args.output
-        if not output_path:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_path = f"report_{timestamp}.md"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = args.output or f"report_{timestamp}.md"
         
         # Write report
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(report)
         
         logger.info(f"Report written to: {output_path}")
-        
-        # Print summary
-        if hasattr(final_state, 'papers_ingested'):
-            papers_count = len(final_state.papers_ingested) if isinstance(final_state.papers_ingested, dict) else 0
-        elif isinstance(final_state, dict):
-            papers_count = len(final_state.get('papers_ingested', {}))
-        else:
-            papers_count = 0
-            
+
+        # Export the full run (report + KB export + slim state + summary) so the
+        # inspection scripts and app can read the dynamic knowledge base.
+        from .graph.workflow import export_run
+        run_dir = os.path.join("run_output", timestamp)
+        try:
+            paths = export_run(final_state, run_dir)
+            logger.info(f"Run artifacts written to: {run_dir}")
+        except Exception as e:
+            logger.warning(f"Could not export run artifacts: {e}")
+
+        # Print summary from the knowledge base.
+        corpus_id = final_state.get("corpus_id") if isinstance(final_state, dict) else getattr(final_state, "corpus_id", "")
+        papers_count, claims_count, cost = 0, 0, 0.0
+        try:
+            from .storage.registry import get_knowledge_base
+            if corpus_id:
+                kb = get_knowledge_base(corpus_id)
+                papers_count = kb.reviewed_count()
+                claims_count = len(kb.all_claims())
+        except Exception:
+            pass
+        cost = final_state.get("estimated_cost_usd", 0.0) if isinstance(final_state, dict) else getattr(final_state, "estimated_cost_usd", 0.0)
+
         print(f"\n{'='*60}")
         print(f"Research Complete!")
         print(f"{'='*60}")
         print(f"Topic: {args.topic}")
         print(f"Papers reviewed: {papers_count}")
+        print(f"Claims extracted: {claims_count}")
+        print(f"Estimated LLM cost: ${cost:.3f}")
         print(f"Output: {output_path}")
+        print(f"Run artifacts: {run_dir}")
         print(f"{'='*60}\n")
         
     except KeyboardInterrupt:

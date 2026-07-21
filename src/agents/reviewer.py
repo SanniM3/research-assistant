@@ -19,19 +19,20 @@ def reviewer_node(state: ResearchState) -> Dict[str, Any]:
     - Provide actionable required changes
     - Suggest retrieval/extraction tasks for gaps
     """
-    llm = get_llm()
+    llm = get_llm(role="reviewer")
+    kb = state.kb()
     
     state.log_action("reviewer", "starting", {})
     
     # Compile full draft
-    full_draft = compile_draft_for_review(state)
+    full_draft = compile_draft_for_review(state, kb)
     
     # Conduct review
     review_result = conduct_review(
         draft=full_draft,
         topic=state.topic,
-        papers_count=len(state.papers_ingested),
-        claims_count=len(state.claims),
+        papers_count=kb.reviewed_count(),
+        claims_count=len(kb.all_claims()),
         llm=llm
     )
     
@@ -40,12 +41,12 @@ def reviewer_node(state: ResearchState) -> Dict[str, Any]:
     
     # Merge issues
     all_issues = list(state.issues) + new_issues
-    
-    # Determine next step based on issue types
-    blocking_issues = [i for i in all_issues
-                       if i.severity == IssueSeverity.BLOCKER and i.status == IssueStatus.OPEN]
 
-    # Separate research-gap issues from writing-quality issues
+    # Actionable issues drive the loops: BLOCKERs always, MAJORs when they
+    # accumulate. Retries are bounded by counters to prevent thrashing.
+    actionable = [i for i in all_issues if i.status == IssueStatus.OPEN
+                  and i.severity in (IssueSeverity.BLOCKER, IssueSeverity.MAJOR)]
+
     research_categories = {
         IssueCategory.MISSING_SEMINAL, IssueCategory.MISSING_RECENT,
         IssueCategory.BENCHMARK_GAP, IssueCategory.TAXONOMY_GAP,
@@ -57,37 +58,57 @@ def reviewer_node(state: ResearchState) -> Dict[str, Any]:
         IssueCategory.CONTRADICTION,
     }
 
-    open_research = [i for i in blocking_issues if i.category in research_categories]
-    open_writing = [i for i in blocking_issues if i.category in writing_categories]
+    open_research = [i for i in actionable if i.category in research_categories]
+    open_writing = [i for i in actionable if i.category in writing_categories]
 
-    if open_research and state.iteration < state.max_iterations:
+    def _triggers(items):
+        return any(i.severity == IssueSeverity.BLOCKER for i in items) or len(items) >= 2
+
+    revision_count = state.revision_count
+    resynth_count = state.resynth_count
+    next_phase = "finalize"
+
+    if (open_research and _triggers(open_research)
+            and state.iteration < state.max_iterations
+            and revision_count < state.max_revisions):
         next_phase = "revision"
-    elif open_writing and state.iteration < state.max_iterations:
+        revision_count += 1
+    elif (open_writing and _triggers(open_writing)
+            and resynth_count < state.max_resynths):
         next_phase = "resynthesize"
-    else:
-        next_phase = "finalize"
+        resynth_count += 1
 
     state.log_action("reviewer", "completed", {
         "new_issues": len(new_issues),
-        "blocking_research": len(open_research),
-        "blocking_writing": len(open_writing),
+        "actionable_research": len(open_research),
+        "actionable_writing": len(open_writing),
         "next_phase": next_phase,
+        "revision_count": revision_count,
+        "resynth_count": resynth_count,
     })
 
     return {
         "issues": all_issues,
         "phase": next_phase,
+        "revision_count": revision_count,
+        "resynth_count": resynth_count,
+        "estimated_cost_usd": _cost(),
     }
 
 
-def compile_draft_for_review(state: ResearchState) -> str:
+def _cost() -> float:
+    from .base import get_cost
+    return round(get_cost().get("usd", 0.0), 4)
+
+
+def compile_draft_for_review(state: ResearchState, kb) -> str:
     """Compile draft sections for review."""
     parts = []
     
     parts.append(f"# Survey: {state.topic}\n")
     parts.append(f"Scope: {state.scope}\n")
-    parts.append(f"Papers reviewed: {len(state.papers_ingested)}\n")
-    parts.append(f"Claims extracted: {len(state.claims)}\n\n")
+    parts.append(f"Papers reviewed: {kb.reviewed_count()}\n")
+    parts.append(f"Claims extracted: {len(kb.all_claims())}\n\n")
     
     for section in sorted(state.outline, key=lambda s: s.order):
         content = state.draft_sections.get(section.section_id, "[Section not yet written]")

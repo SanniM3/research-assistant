@@ -19,7 +19,8 @@ def retriever_node(state: ResearchState) -> Dict[str, Any]:
     - Track query execution in audit log
     """
     state.log_action("retriever", "executing_queries", {"count": len(state.pending_queries)})
-    
+
+    ingested_map = state.kb().papers_map()
     new_candidates = []
     queries_completed = []
     
@@ -44,7 +45,7 @@ def retriever_node(state: ResearchState) -> Dict[str, Any]:
             # Deduplicate against existing AND already-added papers in this batch
             all_existing = state.candidate_papers + new_candidates
             for paper in papers:
-                if not is_duplicate(paper, all_existing, state.papers_ingested):
+                if not is_duplicate(paper, all_existing, ingested_map):
                     new_candidates.append(paper)
                     all_existing.append(paper)
             
@@ -54,7 +55,7 @@ def retriever_node(state: ResearchState) -> Dict[str, Any]:
                 query_text=query_text,
                 source=source,
                 results_count=len(results),
-                selected_count=len([p for p in papers if not is_duplicate(p, state.candidate_papers, state.papers_ingested)]),
+                selected_count=len([p for p in papers if not is_duplicate(p, state.candidate_papers, ingested_map)]),
             )
             queries_completed.append(query_record)
             
@@ -104,32 +105,66 @@ def execute_web_search(query: str, max_results: int = 5) -> List[Dict]:
 
 
 def parse_web_results_to_papers(results: List[Dict], query: str) -> List[Paper]:
-    """Convert web search results to Paper objects."""
+    """Convert web search results to Paper objects with best-effort metadata.
+
+    Web results are unstructured, so we (a) only keep results from known academic
+    domains and (b) enrich with any year we can parse and a venue guessed from the
+    domain. This keeps later citation formatting and timeline coverage sane rather
+    than emitting authorless, yearless references.
+    """
+    import re
+    from ..models.paper import PaperMetadata, MetadataConfidence
+
+    domain_venue = {
+        "arxiv": "arXiv", "aclanthology": "ACL Anthology", "aclweb": "ACL",
+        "ieee": "IEEE", "acm": "ACM", "springer": "Springer",
+        "semanticscholar": "Semantic Scholar", "openreview": "OpenReview",
+        "neurips": "NeurIPS", "nips": "NeurIPS", "mlr.press": "PMLR",
+    }
+
     papers = []
-    
     for result in results:
         url = result.get("url", "")
         title = result.get("title", "")
-        
+        content = result.get("content", "") or ""
+
         if not title or not url:
             continue
-        
-        # Try to detect if this is an academic paper
-        # (This is a heuristic - web results are less structured)
-        is_academic = any(domain in url.lower() for domain in [
-            "arxiv", "acl", "ieee", "acm", "springer", "semanticscholar",
-            "openreview", "neurips", "mlr.press"
-        ])
-        
-        if is_academic:
-            paper = Paper(
-                paper_id=Paper.generate_paper_id(title=title),
-                title=title,
-                url_list=[url],
-                abstract=result.get("content", "")[:500],
-            )
-            papers.append(paper)
-    
+
+        url_lower = url.lower()
+        matched = [d for d in domain_venue if d in url_lower]
+        if not matched:
+            continue
+
+        # Best-effort year extraction from url/title/content.
+        year = None
+        for source in (url, title, content[:400]):
+            m = re.search(r"\b(19|20)\d{2}\b", source)
+            if m:
+                candidate = int(m.group(0))
+                if 1950 <= candidate <= 2100:
+                    year = candidate
+                    break
+
+        # Detect arXiv id embedded in the URL to unlock full-text ingestion.
+        arxiv_id = None
+        am = re.search(r"arxiv\.org/(?:abs|pdf|html)/(\d{4}\.\d{4,5})", url_lower)
+        if am:
+            arxiv_id = am.group(1)
+
+        paper = Paper(
+            paper_id=Paper.generate_paper_id(arxiv_id=arxiv_id, title=title),
+            title=title,
+            year=year,
+            venue=domain_venue[matched[0]],
+            arxiv_id=arxiv_id,
+            url_list=[url],
+            abstract=content[:500],
+            metadata_confidence=MetadataConfidence.LOW,
+            metadata=PaperMetadata(),
+        )
+        papers.append(paper)
+
     return papers
 
 

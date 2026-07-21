@@ -85,6 +85,19 @@ def extract_state_value(state, key, default=None):
     return getattr(state, key, default)
 
 
+def kb_counts(state):
+    """Return (papers_reviewed, claims) from the persistent KB for a state."""
+    corpus_id = extract_state_value(state, "corpus_id", "")
+    if not corpus_id:
+        return 0, 0
+    try:
+        from src.storage.registry import get_knowledge_base
+        kb = get_knowledge_base(corpus_id)
+        return kb.reviewed_count(), len(kb.all_claims())
+    except Exception:
+        return 0, 0
+
+
 def run_research(topic: str, constraints: str, max_iterations: int, use_streaming: bool = False):
     """Run the research workflow with progress updates."""
     st.session_state.is_running = True
@@ -98,10 +111,14 @@ def run_research(topic: str, constraints: str, max_iterations: int, use_streamin
     st.session_state.workflow = workflow
     
     # Create initial state
+    from src.storage.registry import derive_corpus_id
+    from src.agents.base import reset_cost
+    reset_cost()
     initial_state = ResearchState(
         topic=topic,
         user_constraints=constraints if constraints else None,
         max_iterations=max_iterations,
+        corpus_id=derive_corpus_id(topic),
         phase="init",
     )
     
@@ -127,14 +144,12 @@ def run_research(topic: str, constraints: str, max_iterations: int, use_streamin
                         "phase": phase,
                     }
                     
-                    # Safely extract metrics
-                    papers_ingested = extract_state_value(node_state, 'papers_ingested', {})
-                    if papers_ingested:
-                        log_entry["papers"] = len(papers_ingested) if isinstance(papers_ingested, dict) else 0
-                    
-                    claims = extract_state_value(node_state, 'claims', {})
-                    if claims:
-                        log_entry["claims"] = len(claims) if isinstance(claims, dict) else 0
+                    # Metrics now live in the KB (keyed by corpus_id), not state.
+                    papers_n, claims_n = kb_counts(node_state)
+                    if papers_n:
+                        log_entry["papers"] = papers_n
+                    if claims_n:
+                        log_entry["claims"] = claims_n
                     
                     st.session_state.progress_log.append(log_entry)
                     st.session_state.research_state = node_state
@@ -156,22 +171,16 @@ def run_research(topic: str, constraints: str, max_iterations: int, use_streamin
             st.session_state.research_state = final_state
             
             # Extract final report
-            if isinstance(final_state, dict):
-                st.session_state.final_report = final_state.get('final_report', '')
-                papers = final_state.get('papers_ingested', {})
-                claims = final_state.get('claims', {})
-            else:
-                st.session_state.final_report = getattr(final_state, 'final_report', '')
-                papers = getattr(final_state, 'papers_ingested', {})
-                claims = getattr(final_state, 'claims', {})
+            st.session_state.final_report = extract_state_value(final_state, 'final_report', '')
+            papers_n, claims_n = kb_counts(final_state)
             
             # Log final state
             st.session_state.progress_log.append({
                 "time": datetime.now().strftime("%H:%M:%S"),
                 "node": "complete",
                 "phase": "complete",
-                "papers": len(papers) if papers else 0,
-                "claims": len(claims) if claims else 0,
+                "papers": papers_n,
+                "claims": claims_n,
             })
         
         st.session_state.is_running = False

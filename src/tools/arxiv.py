@@ -44,15 +44,17 @@ def arxiv_search(
     }
     sort_criterion = sort_map.get(sort_by, arxiv.SortCriterion.Relevance)
     
-    # Execute search
+    # Execute search via the arxiv Client (the Search.results() generator is
+    # deprecated and rate-limits poorly).
     search = arxiv.Search(
         query=full_query,
         max_results=max_results,
         sort_by=sort_criterion
     )
+    client = arxiv.Client()
     
     results = []
-    for result in search.results():
+    for result in client.results(search):
         # Apply date filters if specified
         pub_date = result.published
         if date_from:
@@ -98,7 +100,7 @@ def fetch_arxiv_paper(arxiv_id: str) -> Optional[Paper]:
     """
     try:
         search = arxiv.Search(id_list=[arxiv_id])
-        results = list(search.results())
+        results = list(arxiv.Client().results(search))
         
         if not results:
             return None

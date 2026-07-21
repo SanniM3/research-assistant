@@ -20,7 +20,7 @@ def planner_node(state: ResearchState) -> Dict[str, Any]:
     be refined after research completes and we know what findings, groups,
     and comparisons actually emerged.
     """
-    llm = get_llm()
+    llm = get_llm(role="planner")
 
     state.log_action("planner", "creating_plan", {"topic": state.topic})
 

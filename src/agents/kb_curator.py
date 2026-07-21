@@ -1,220 +1,180 @@
-"""KB Curator agent - maintains knowledge base consistency."""
-from typing import Dict, Any, List, Optional
+"""KB Curator agent - maintains knowledge base consistency.
+
+Merges duplicate entities, resolves relation endpoints, and links claims to
+entities. Endpoint/claim resolution uses embedding similarity when available
+(so paraphrased names still match), with a fuzzy-string fallback for offline
+robustness.
+"""
+from typing import Dict, Any, List, Optional, Tuple
 from difflib import SequenceMatcher
 
 from ..models.state import ResearchState
 from ..models.entity import Entity, EntityType
 from ..models.relation import Relation
 from ..models.claim import Claim
+from ..config.settings import get_settings
+from ..storage.vector_store import EmbeddingIndex
+from .base import embed_texts
 
 
 def kb_curator_node(state: ResearchState) -> Dict[str, Any]:
-    """
-    KB Curator node - ensures knowledge base consistency.
-    
-    Responsibilities:
-    - Merge duplicate entities
-    - Resolve entity aliases
-    - Link claims to entity IDs
-    - Resolve relation entity references
-    - Ensure referential integrity
-    """
+    """Ensure knowledge base consistency, then persist the cleaned graph."""
+    kb = state.kb()
+    entities = kb.entities_map()
+    relations = kb.relations_map()
+    claims = kb.claims_map()
+
     state.log_action("kb_curator", "starting", {
-        "entities": len(state.entities),
-        "relations": len(state.relations),
-        "claims": len(state.claims),
+        "entities": len(entities), "relations": len(relations), "claims": len(claims),
     })
-    
-    # Work with copies
-    entities = dict(state.entities)
-    relations = dict(state.relations)
-    claims = dict(state.claims)
-    
-    # Step 1: Merge duplicate entities
+
     entities, merge_map = merge_duplicate_entities(entities)
-    
-    # Step 2: Update relations with resolved entity IDs
-    relations = resolve_relation_entities(relations, entities, merge_map)
-    
-    # Step 3: Link claims to entity IDs
-    claims = link_claims_to_entities(claims, entities)
-    
-    # Step 4: Validate referential integrity
-    integrity_warnings = validate_integrity(claims, entities, relations, state.chunks)
+    resolver = _build_entity_resolver(entities)
+    relations = resolve_relation_entities(relations, entities, merge_map, resolver)
+    claims = link_claims_to_entities(claims, entities, resolver)
+
+    kb.replace_entities(entities)
+    kb.replace_relations(relations)
+    kb.replace_claims(claims)
 
     state.log_action("kb_curator", "completed", {
         "entities_after_merge": len(entities),
         "merges_performed": len(merge_map),
-        "integrity_warnings": len(integrity_warnings),
+        "relations_kept": len(relations),
     })
-    
-    return {
-        "entities": entities,
-        "relations": relations,
-        "claims": claims,
-        "phase": "gap_scoring",
-    }
+
+    return {"phase": "gap_scoring"}
 
 
-def merge_duplicate_entities(entities: Dict[str, Entity]) -> tuple:
-    """
-    Merge duplicate entities based on name similarity.
-    
-    Returns:
-        Tuple of (merged entities dict, merge map of old_id -> new_id)
-    """
-    merge_map = {}
-    canonical_entities = {}
-    
-    # Group entities by type first
+# ---------------------------------------------------------------------------
+# Entity resolver (embedding with fuzzy fallback)
+# ---------------------------------------------------------------------------
+
+class _EntityResolver:
+    def __init__(self, entities: Dict[str, Entity]):
+        self.entities = entities
+        self.threshold = get_settings().entity_link_similarity
+        self._exact: Dict[str, str] = {}
+        for eid, e in entities.items():
+            self._exact[e.name.lower().strip()] = eid
+            for alias in e.aliases:
+                self._exact.setdefault(alias.lower().strip(), eid)
+        # Optional semantic index over entity names/aliases.
+        self._index = EmbeddingIndex(embed_texts)
+        items = []
+        for eid, e in entities.items():
+            surface = e.name + (" " + " ".join(e.aliases) if e.aliases else "")
+            items.append((eid, surface, {}))
+        self._index.add(items)
+
+    def resolve(self, name: str) -> Optional[str]:
+        if not name:
+            return None
+        key = name.lower().strip()
+        if key in self._exact:
+            return self._exact[key]
+        # Semantic nearest
+        hits = self._index.search(name, k=1)
+        if hits and hits[0][1] >= self.threshold:
+            return hits[0][0]
+        # Fuzzy fallback
+        best_id, best_ratio = None, 0.0
+        for eid, e in self.entities.items():
+            for surface in [e.name] + e.aliases:
+                ratio = SequenceMatcher(None, key, surface.lower().strip()).ratio()
+                if ratio > best_ratio:
+                    best_ratio, best_id = ratio, eid
+        if best_ratio >= 0.85:
+            return best_id
+        return None
+
+
+def _build_entity_resolver(entities: Dict[str, Entity]) -> _EntityResolver:
+    return _EntityResolver(entities)
+
+
+# ---------------------------------------------------------------------------
+# Entity de-duplication (within type)
+# ---------------------------------------------------------------------------
+
+def merge_duplicate_entities(entities: Dict[str, Entity]) -> Tuple[Dict[str, Entity], Dict[str, str]]:
+    merge_map: Dict[str, str] = {}
+    canonical_entities: Dict[str, Entity] = {}
+
     by_type: Dict[EntityType, List[Entity]] = {}
     for entity in entities.values():
-        if entity.entity_type not in by_type:
-            by_type[entity.entity_type] = []
-        by_type[entity.entity_type].append(entity)
-    
-    # Find duplicates within each type
-    for entity_type, type_entities in by_type.items():
+        by_type.setdefault(entity.entity_type, []).append(entity)
+
+    for _entity_type, type_entities in by_type.items():
         processed = set()
-        
         for entity in type_entities:
             if entity.entity_id in processed:
                 continue
-            
-            # Find similar entities
             similar = find_similar_entities(entity, type_entities, processed)
-            
-            if similar:
-                # Merge all similar into the first one
-                canonical = entity
-                for sim_entity in similar:
-                    canonical.merge_with(sim_entity)
-                    merge_map[sim_entity.entity_id] = canonical.entity_id
-                    processed.add(sim_entity.entity_id)
-            
+            for sim_entity in similar:
+                entity.merge_with(sim_entity)
+                merge_map[sim_entity.entity_id] = entity.entity_id
+                processed.add(sim_entity.entity_id)
             canonical_entities[entity.entity_id] = entity
             processed.add(entity.entity_id)
-    
+
     return canonical_entities, merge_map
 
 
-def find_similar_entities(entity: Entity, candidates: List[Entity], 
+def find_similar_entities(entity: Entity, candidates: List[Entity],
                           exclude: set, threshold: float = 0.85) -> List[Entity]:
-    """Find entities with similar names."""
     similar = []
-    
     entity_names = [entity.name.lower()] + [a.lower() for a in entity.aliases]
-    
     for candidate in candidates:
-        if candidate.entity_id == entity.entity_id:
+        if candidate.entity_id == entity.entity_id or candidate.entity_id in exclude:
             continue
-        if candidate.entity_id in exclude:
-            continue
-        
         candidate_names = [candidate.name.lower()] + [a.lower() for a in candidate.aliases]
-        
-        # Check for name match
+        matched = False
         for en in entity_names:
             for cn in candidate_names:
-                # Exact match
-                if en == cn:
+                if en == cn or SequenceMatcher(None, en, cn).ratio() >= threshold:
                     similar.append(candidate)
+                    matched = True
                     break
-                # Fuzzy match
-                similarity = SequenceMatcher(None, en, cn).ratio()
-                if similarity >= threshold:
-                    similar.append(candidate)
-                    break
-            else:
-                continue
-            break
-    
+            if matched:
+                break
     return similar
 
 
-def resolve_relation_entities(relations: Dict[str, Relation], 
-                              entities: Dict[str, Entity],
-                              merge_map: Dict[str, str]) -> Dict[str, Relation]:
-    """Resolve relation entity references to actual entity IDs."""
-    resolved_relations = {}
-    
+# ---------------------------------------------------------------------------
+# Relation + claim resolution
+# ---------------------------------------------------------------------------
+
+def resolve_relation_entities(relations: Dict[str, Relation], entities: Dict[str, Entity],
+                              merge_map: Dict[str, str], resolver: _EntityResolver) -> Dict[str, Relation]:
+    resolved: Dict[str, Relation] = {}
     for rel_id, relation in relations.items():
-        # Resolve subject
-        subject_id = resolve_entity_reference(
-            relation.subject_entity_id, entities, merge_map
-        )
-        
-        # Resolve object
-        object_id = resolve_entity_reference(
-            relation.object_entity_id, entities, merge_map
-        )
-        
-        if subject_id and object_id:
+        subject_id = _resolve_ref(relation.subject_entity_id, entities, merge_map, resolver)
+        object_id = _resolve_ref(relation.object_entity_id, entities, merge_map, resolver)
+        if subject_id and object_id and subject_id != object_id:
             relation.subject_entity_id = subject_id
             relation.object_entity_id = object_id
-            resolved_relations[rel_id] = relation
-    
-    return resolved_relations
+            resolved[rel_id] = relation
+    return resolved
 
 
-def resolve_entity_reference(ref: str, entities: Dict[str, Entity],
-                             merge_map: Dict[str, str]) -> Optional[str]:
-    """Resolve an entity reference (ID or name) to a canonical entity ID."""
-    # Check if it's already a valid ID
+def _resolve_ref(ref: str, entities: Dict[str, Entity], merge_map: Dict[str, str],
+                 resolver: _EntityResolver) -> Optional[str]:
     if ref in entities:
         return ref
-    
-    # Check merge map
     if ref in merge_map:
         return merge_map[ref]
-    
-    # Try to match by name
-    ref_lower = ref.lower()
-    for entity in entities.values():
-        if entity.name.lower() == ref_lower:
-            return entity.entity_id
-        if any(a.lower() == ref_lower for a in entity.aliases):
-            return entity.entity_id
-    
-    return None
+    return resolver.resolve(ref)
 
 
-def link_claims_to_entities(claims: Dict[str, Claim],
-                            entities: Dict[str, Entity]) -> Dict[str, Claim]:
-    """Link claims to relevant entity IDs based on mentions."""
+def link_claims_to_entities(claims: Dict[str, Claim], entities: Dict[str, Entity],
+                            resolver: _EntityResolver) -> Dict[str, Claim]:
     for claim in claims.values():
         claim_text_lower = claim.text.lower()
-        
-        linked_entities = []
+        linked = set()
         for entity in entities.values():
-            # Check if entity or aliases mentioned in claim
-            if entity.name.lower() in claim_text_lower:
-                linked_entities.append(entity.entity_id)
-            elif any(alias.lower() in claim_text_lower for alias in entity.aliases):
-                linked_entities.append(entity.entity_id)
-        
-        claim.entity_ids = list(set(linked_entities))
-    
+            names = [entity.name] + entity.aliases
+            if any(n and n.lower() in claim_text_lower for n in names):
+                linked.add(entity.entity_id)
+        claim.entity_ids = list(linked)
     return claims
-
-
-def validate_integrity(claims: Dict[str, Claim], entities: Dict[str, Entity],
-                      relations: Dict[str, Relation], chunks: Dict) -> List[str]:
-    """Validate referential integrity of knowledge base.
-
-    Returns a list of warning strings (empty when everything is consistent).
-    """
-    warnings: List[str] = []
-
-    for claim_id, claim in claims.items():
-        for evidence in claim.evidence:
-            if evidence.chunk_id and evidence.chunk_id not in chunks:
-                warnings.append(f"Claim {claim_id}: evidence chunk {evidence.chunk_id} missing")
-
-    for rel_id, relation in relations.items():
-        if relation.subject_entity_id not in entities:
-            warnings.append(f"Relation {rel_id}: subject {relation.subject_entity_id} missing")
-        if relation.object_entity_id not in entities:
-            warnings.append(f"Relation {rel_id}: object {relation.object_entity_id} missing")
-
-    return warnings

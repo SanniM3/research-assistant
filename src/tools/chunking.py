@@ -7,6 +7,42 @@ from ..models.chunk import Chunk, SourceType, ChunkQuality, ChunkMetadata
 from ..config.settings import get_settings
 
 
+# Section headings whose content is not useful for claim extraction / grounding.
+_DROP_SECTION_KEYWORDS = (
+    "references", "bibliography", "acknowledg", "appendix",
+    "author contribution", "conflict of interest", "funding",
+)
+
+
+def detect_language(text: str) -> str:
+    """Best-effort language detection; defaults to 'en' when unavailable."""
+    sample = (text or "").strip()
+    if len(sample) < 20:
+        return "en"
+    try:
+        from langdetect import detect  # optional dependency
+        return detect(sample[:1000])
+    except Exception:
+        return "en"
+
+
+def _is_drop_section(section_path: str, heading: Optional[str]) -> bool:
+    text = f"{section_path or ''} {heading or ''}".lower()
+    return any(kw in text for kw in _DROP_SECTION_KEYWORDS)
+
+
+def _filter_chunks(chunks: List[Chunk]) -> List[Chunk]:
+    """Drop low-quality chunks and non-content sections (references, etc.)."""
+    kept: List[Chunk] = []
+    for chunk in chunks:
+        if chunk.quality == ChunkQuality.LOW:
+            continue
+        if _is_drop_section(chunk.section_path, chunk.metadata.heading):
+            continue
+        kept.append(chunk)
+    return kept
+
+
 def chunk_text(
     text: str,
     paper_id: str,
@@ -64,13 +100,14 @@ def chunk_text(
             text=chunk_text,
             source_type=source_type,
             section_path=section_path,
+            quality=_assess_chunk_quality(chunk_text),
             metadata=ChunkMetadata(
                 heading=_extract_heading(chunk_text),
             )
         )
         chunks.append(chunk)
     
-    return chunks
+    return _filter_chunks(chunks)
 
 
 def chunk_document(
@@ -97,33 +134,21 @@ def chunk_document(
     """
     settings = get_settings()
     chunk_size = chunk_size or settings.chunk_size
-    chunk_overlap = chunk_overlap or settings.chunk_overlap
-    
-    splitter = RecursiveCharacterTextSplitter(
+
+    # Join page text and run section-aware chunking so that non-content sections
+    # (References, Acknowledgments, Appendix) are detected by heading and dropped,
+    # rather than competing for the extractor's attention. This yields much better
+    # grounding than blind page-based splitting.
+    full_text = "\n\n".join(doc.page_content for doc in documents if doc.page_content)
+    if not full_text.strip():
+        return []
+
+    return chunk_with_sections(
+        text=full_text,
+        paper_id=paper_id,
+        source_type=source_type,
         chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", ". ", " ", ""],
     )
-    
-    # Split documents
-    split_docs = splitter.split_documents(documents)
-    
-    # Convert to Chunks
-    chunks = []
-    for doc in split_docs:
-        page_num = doc.metadata.get("page", 0)
-        
-        chunk = Chunk.create(
-            paper_id=paper_id,
-            text=doc.page_content,
-            source_type=source_type,
-            section_path=f"page_{page_num + 1}",
-            page_span=(page_num, page_num),
-            quality=_assess_chunk_quality(doc.page_content),
-        )
-        chunks.append(chunk)
-    
-    return chunks
 
 
 def chunk_with_sections(

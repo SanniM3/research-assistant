@@ -18,16 +18,17 @@ def outline_refiner_node(state: ResearchState) -> Dict[str, Any]:
     if state.outline_finalized:
         return {}
 
-    llm = get_llm()
+    llm = get_llm(role="outline_refiner")
+    kb = state.kb()
     state.log_action("outline_refiner", "starting", {
         "preliminary_sections": len(state.outline),
-        "entities": len(state.entities),
-        "claims": len(state.claims),
+        "entities": len(kb.all_entities()),
+        "claims": len(kb.all_claims()),
     })
 
-    entity_summary = _summarize_entities(state)
-    claim_type_counts = _count_claim_types(state)
-    relation_summary = _summarize_relations(state)
+    entity_summary = _summarize_entities(kb)
+    claim_type_counts = _count_claim_types(kb)
+    relation_summary = _summarize_relations(kb)
     question_summary = [
         {"text": q.text, "status": q.status.value, "answer": q.answer_summary}
         for q in state.research_questions
@@ -37,6 +38,7 @@ def outline_refiner_node(state: ResearchState) -> Dict[str, Any]:
 
 TOPIC: {state.topic}
 SCOPE: {state.scope}
+OUTPUT LANGUAGE: {state.output_language}
 
 PRELIMINARY OUTLINE:
 {json.dumps([{"id": s.section_id, "title": s.title, "desc": s.description} for s in state.outline], indent=2)}
@@ -45,8 +47,8 @@ RESEARCH QUESTIONS AND STATUS:
 {json.dumps(question_summary, indent=2)}
 
 KNOWLEDGE BASE SUMMARY:
-- Papers ingested: {len(state.papers_ingested)}
-- Claims extracted: {len(state.claims)}  (by type: {json.dumps(claim_type_counts)})
+- Papers reviewed: {kb.reviewed_count()}
+- Claims extracted: {len(kb.all_claims())}  (by type: {json.dumps(claim_type_counts)})
 - Entities: {json.dumps(entity_summary, indent=2)}
 - Relations: {json.dumps(relation_summary[:20], indent=2)}
 
@@ -116,24 +118,24 @@ Output ONLY valid JSON."""
     }
 
 
-def _summarize_entities(state: ResearchState) -> Dict[str, int]:
+def _summarize_entities(kb) -> Dict[str, int]:
     counts: Dict[str, int] = {}
-    for e in state.entities.values():
+    for e in kb.all_entities():
         t = e.entity_type.value
         counts[t] = counts.get(t, 0) + 1
     return counts
 
 
-def _count_claim_types(state: ResearchState) -> Dict[str, int]:
+def _count_claim_types(kb) -> Dict[str, int]:
     counts: Dict[str, int] = {}
-    for c in state.claims.values():
+    for c in kb.all_claims():
         t = c.claim_type.value
         counts[t] = counts.get(t, 0) + 1
     return counts
 
 
-def _summarize_relations(state: ResearchState) -> List[Dict[str, str]]:
+def _summarize_relations(kb) -> List[Dict[str, str]]:
     return [
         {"type": r.predicate.value, "source": r.subject_entity_id, "target": r.object_entity_id}
-        for r in list(state.relations.values())[:30]
+        for r in kb.all_relations()[:30]
     ]

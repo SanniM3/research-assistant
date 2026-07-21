@@ -1,387 +1,340 @@
-"""Knowledge base for structured storage of papers, claims, entities, relations."""
-from typing import List, Optional, Dict, Any
-from datetime import datetime
+"""Dynamic, persistent knowledge base for the research assistant.
+
+This is the single source of truth at runtime. It holds papers, chunks, claims,
+entities, relations and issues, plus two semantic indexes (chunks and claims)
+used for RAG. It persists per corpus to a single SQLite file plus cached
+embeddings, so re-runs of the same or overlapping topics accumulate knowledge
+instead of starting from scratch, and no chunk is ever re-embedded or a paper
+re-ingested unnecessarily.
+
+Agents access the KB through ``storage.registry.get_knowledge_base(corpus_id)``
+rather than holding it on the (checkpointed) ResearchState, which keeps state
+small and gives us durable, queryable knowledge.
+"""
+from typing import List, Optional, Dict, Any, Tuple
 import json
 import os
+import sqlite3
 
 from ..models.paper import Paper
 from ..models.chunk import Chunk
-from ..models.claim import Claim, ClaimType
+from ..models.claim import Claim
 from ..models.entity import Entity, EntityType
-from ..models.relation import Relation, RelationType
-from ..models.issue import Issue, IssueStatus, IssueSeverity
-from .base import InMemoryStorage
-from .vector_store import VectorStore
-from ..config.settings import get_settings
+from ..models.relation import Relation
+from ..models.issue import Issue
+from .vector_store import EmbeddingIndex
+
+
+_TABLES = ["papers", "chunks", "claims", "entities", "relations", "issues"]
+
+_INGESTION_COMPLETE = "complete"
+_INGESTION_ABSTRACT_ONLY = "abstract_only"
 
 
 class KnowledgeBase:
-    """
-    Central knowledge base for the research assistant.
-    
-    Manages:
-    - Papers: Academic papers that have been retrieved/ingested
-    - Chunks: Text chunks for RAG retrieval
-    - Claims: Structured assertions extracted from papers
-    - Entities: Concepts in the knowledge graph
-    - Relations: Relationships between entities
-    - Issues: Problems driving iteration
-    
-    Provides unified interface for:
-    - Storage and retrieval
-    - Semantic search
-    - Deduplication
-    - Provenance tracking
-    """
-    
-    def __init__(self, persist_dir: Optional[str] = None):
-        """
-        Initialize the knowledge base.
-        
-        Args:
-            persist_dir: Directory for persisting data
-        """
-        settings = get_settings()
-        self.persist_dir = persist_dir or settings.data_dir
-        
-        # Initialize storage backends
-        self._papers = InMemoryStorage[Paper]()
-        self._papers.set_id_field("paper_id")
-        
-        self._claims = InMemoryStorage[Claim]()
-        self._claims.set_id_field("claim_id")
-        
-        self._entities = InMemoryStorage[Entity]()
-        self._entities.set_id_field("entity_id")
-        
-        self._relations = InMemoryStorage[Relation]()
-        self._relations.set_id_field("relation_id")
-        
-        self._issues = InMemoryStorage[Issue]()
-        self._issues.set_id_field("issue_id")
-        
-        # Vector store for chunks
-        vector_path = os.path.join(self.persist_dir, "vector_store") if self.persist_dir else None
-        self._vector_store = VectorStore(persist_path=vector_path)
-        
-        # Chunk metadata (in addition to vector store)
-        self._chunks: Dict[str, Chunk] = {}
-        
-        # Counters for ID generation
-        self._counters = {
-            "claim": 0,
-            "entity": 0,
-            "relation": 0,
-            "issue": 0,
+    """Runtime knowledge store with semantic retrieval and per-corpus persistence."""
+
+    def __init__(self, corpus_id: str, persist_dir: Optional[str] = None,
+                 enable_persistence: bool = True):
+        from ..agents.base import embed_texts  # local import avoids cycle
+
+        self.corpus_id = corpus_id
+        self.enable_persistence = enable_persistence
+        self.persist_dir = persist_dir
+
+        # In-memory stores (fast path during a run)
+        self.papers: Dict[str, Paper] = {}
+        self.chunks: Dict[str, Chunk] = {}
+        self.claims: Dict[str, Claim] = {}
+        self.entities: Dict[str, Entity] = {}
+        self.relations: Dict[str, Relation] = {}
+        self.issues: Dict[str, Issue] = {}
+        self._extracted_chunk_ids: set = set()
+
+        # Semantic indexes
+        self.chunk_index = EmbeddingIndex(embed_texts)
+        self.claim_index = EmbeddingIndex(embed_texts)
+
+        self._conn: Optional[sqlite3.Connection] = None
+        if self.enable_persistence and self.persist_dir:
+            os.makedirs(self.persist_dir, exist_ok=True)
+            self._conn = sqlite3.connect(os.path.join(self.persist_dir, "kb.sqlite"))
+            self._init_schema()
+            self._load()
+
+    # ------------------------------------------------------------------ schema
+    def _init_schema(self) -> None:
+        cur = self._conn.cursor()
+        for table in _TABLES:
+            cur.execute(f"CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY, data TEXT)")
+        cur.execute("CREATE TABLE IF NOT EXISTS embeddings (kind TEXT, id TEXT, vector TEXT, PRIMARY KEY (kind, id))")
+        cur.execute("CREATE TABLE IF NOT EXISTS extracted_chunks (chunk_id TEXT PRIMARY KEY)")
+        self._conn.commit()
+
+    def _load(self) -> None:
+        cur = self._conn.cursor()
+        loaders = {
+            "papers": (Paper, self.papers, "paper_id"),
+            "chunks": (Chunk, self.chunks, "chunk_id"),
+            "claims": (Claim, self.claims, "claim_id"),
+            "entities": (Entity, self.entities, "entity_id"),
+            "relations": (Relation, self.relations, "relation_id"),
+            "issues": (Issue, self.issues, "issue_id"),
         }
-    
-    # ==================== Paper Methods ====================
-    
-    def add_paper(self, paper: Paper) -> str:
-        """Add a paper to the knowledge base."""
-        # Check for duplicates
-        existing = self.find_duplicate_paper(paper)
-        if existing:
-            return existing.paper_id
-        return self._papers.save(paper)
-    
-    def get_paper(self, paper_id: str) -> Optional[Paper]:
-        """Get a paper by ID."""
-        return self._papers.get(paper_id)
-    
-    def get_all_papers(self) -> List[Paper]:
-        """Get all papers."""
-        return self._papers.get_all()
-    
-    def get_ingested_papers(self) -> List[Paper]:
-        """Get all papers that have been fully ingested."""
-        return self._papers.query({"is_ingested": True})
-    
-    def find_duplicate_paper(self, paper: Paper) -> Optional[Paper]:
-        """Find if a paper already exists (by DOI, arXiv ID, or title similarity)."""
-        for existing in self._papers.get_all():
-            # Check DOI match
-            if paper.doi and existing.doi and paper.doi == existing.doi:
-                return existing
-            # Check arXiv ID match
-            if paper.arxiv_id and existing.arxiv_id:
-                # Normalize arXiv IDs (remove version)
-                p_base = paper.arxiv_id.split("v")[0]
-                e_base = existing.arxiv_id.split("v")[0]
-                if p_base == e_base:
-                    return existing
-            # Check title similarity (simple exact match for now)
-            if paper.title and existing.title:
-                if paper.title.lower().strip() == existing.title.lower().strip():
-                    return existing
-        return None
-    
-    def update_paper(self, paper_id: str, updates: Dict[str, Any]) -> Optional[Paper]:
-        """Update a paper."""
-        return self._papers.update(paper_id, updates)
-    
-    def mark_paper_ingested(self, paper_id: str) -> None:
-        """Mark a paper as fully ingested."""
-        self._papers.update(paper_id, {"is_ingested": True, "ingestion_status": "complete"})
-    
-    # ==================== Chunk Methods ====================
-    
-    def add_chunk(self, chunk: Chunk) -> str:
-        """Add a chunk to the knowledge base."""
-        self._chunks[chunk.chunk_id] = chunk
-        self._vector_store.add_chunks([chunk])
-        return chunk.chunk_id
-    
-    def add_chunks(self, chunks: List[Chunk]) -> List[str]:
-        """Add multiple chunks."""
-        ids = []
-        for chunk in chunks:
-            self._chunks[chunk.chunk_id] = chunk
-            ids.append(chunk.chunk_id)
-        self._vector_store.add_chunks(chunks)
-        return ids
-    
-    def get_chunk(self, chunk_id: str) -> Optional[Chunk]:
-        """Get a chunk by ID."""
-        return self._chunks.get(chunk_id)
-    
-    def get_chunks_for_paper(self, paper_id: str) -> List[Chunk]:
-        """Get all chunks for a paper."""
-        return [c for c in self._chunks.values() if c.paper_id == paper_id]
-    
-    def search_chunks(self, query: str, k: int = 5, 
-                      paper_id: Optional[str] = None) -> List[Chunk]:
-        """Search chunks semantically."""
-        filters = {"paper_id": paper_id} if paper_id else None
-        results = self._vector_store.search(query, k=k, filters=filters)
-        return [chunk for chunk, score in results]
-    
-    # ==================== Claim Methods ====================
-    
-    def add_claim(self, claim: Claim) -> str:
-        """Add a claim to the knowledge base."""
-        return self._claims.save(claim)
-    
-    def get_claim(self, claim_id: str) -> Optional[Claim]:
-        """Get a claim by ID."""
-        return self._claims.get(claim_id)
-    
-    def get_all_claims(self) -> List[Claim]:
-        """Get all claims."""
-        return self._claims.get_all()
-    
-    def get_claims_for_paper(self, paper_id: str) -> List[Claim]:
-        """Get all claims from a paper."""
-        return self._claims.query({"paper_id": paper_id})
-    
-    def get_claims_by_type(self, claim_type: ClaimType) -> List[Claim]:
-        """Get claims by type."""
-        return self._claims.query({"claim_type": claim_type})
-    
-    def generate_claim_id(self) -> str:
-        """Generate a unique claim ID."""
-        self._counters["claim"] += 1
-        return f"claim_{self._counters['claim']:05d}"
-    
-    def find_contradicting_claims(self, claim: Claim) -> List[Claim]:
-        """Find claims that might contradict the given claim."""
-        # Simple implementation: find claims with same entities but different results
-        contradictions = []
-        for existing in self._claims.get_all():
-            if existing.claim_id == claim.claim_id:
+        for table, (model, store, _id) in loaders.items():
+            for (data,) in cur.execute(f"SELECT data FROM {table}"):
+                try:
+                    obj = model(**json.loads(data))
+                    store[getattr(obj, _id)] = obj
+                except Exception:
+                    continue
+        for (chunk_id,) in cur.execute("SELECT chunk_id FROM extracted_chunks"):
+            self._extracted_chunk_ids.add(chunk_id)
+        # Load cached embeddings into the indexes (no re-embedding).
+        chunk_vecs, claim_vecs = {}, {}
+        for kind, item_id, vector in cur.execute("SELECT kind, id, vector FROM embeddings"):
+            try:
+                vec = json.loads(vector)
+            except Exception:
                 continue
-            # Check for entity overlap
-            common_entities = set(claim.entity_ids) & set(existing.entity_ids)
-            if common_entities and existing.claim_type == claim.claim_type:
-                # Potential contradiction - would need more sophisticated analysis
-                contradictions.append(existing)
-        return contradictions
-    
-    # ==================== Entity Methods ====================
-    
-    def add_entity(self, entity: Entity) -> str:
-        """Add an entity to the knowledge base."""
-        # Check for duplicates/merges
-        existing = self.find_matching_entity(entity.name, entity.entity_type)
-        if existing:
-            existing.merge_with(entity)
-            return existing.entity_id
-        return self._entities.save(entity)
-    
-    def get_entity(self, entity_id: str) -> Optional[Entity]:
-        """Get an entity by ID."""
-        return self._entities.get(entity_id)
-    
-    def get_all_entities(self) -> List[Entity]:
-        """Get all entities."""
-        return self._entities.get_all()
-    
-    def get_entities_by_type(self, entity_type: EntityType) -> List[Entity]:
-        """Get entities by type."""
-        return self._entities.query({"entity_type": entity_type})
-    
-    def find_matching_entity(self, name: str, entity_type: EntityType) -> Optional[Entity]:
-        """Find an existing entity by name and type."""
-        for entity in self._entities.get_all():
-            if entity.entity_type == entity_type and entity.matches_name(name):
-                return entity
-        return None
-    
-    def generate_entity_id(self) -> str:
-        """Generate a unique entity ID."""
-        self._counters["entity"] += 1
-        return f"entity_{self._counters['entity']:05d}"
-    
-    # ==================== Relation Methods ====================
-    
-    def add_relation(self, relation: Relation) -> str:
-        """Add a relation to the knowledge base."""
-        return self._relations.save(relation)
-    
-    def get_relation(self, relation_id: str) -> Optional[Relation]:
-        """Get a relation by ID."""
-        return self._relations.get(relation_id)
-    
-    def get_all_relations(self) -> List[Relation]:
-        """Get all relations."""
-        return self._relations.get_all()
-    
-    def get_relations_for_entity(self, entity_id: str) -> List[Relation]:
-        """Get all relations involving an entity."""
-        relations = []
-        for rel in self._relations.get_all():
-            if rel.subject_entity_id == entity_id or rel.object_entity_id == entity_id:
-                relations.append(rel)
-        return relations
-    
-    def generate_relation_id(self) -> str:
-        """Generate a unique relation ID."""
-        self._counters["relation"] += 1
-        return f"rel_{self._counters['relation']:05d}"
-    
-    # ==================== Issue Methods ====================
-    
-    def add_issue(self, issue: Issue) -> str:
-        """Add an issue to the knowledge base."""
-        return self._issues.save(issue)
-    
-    def get_issue(self, issue_id: str) -> Optional[Issue]:
-        """Get an issue by ID."""
-        return self._issues.get(issue_id)
-    
-    def get_all_issues(self) -> List[Issue]:
-        """Get all issues."""
-        return self._issues.get_all()
-    
-    def get_open_issues(self, severity: Optional[IssueSeverity] = None) -> List[Issue]:
-        """Get open issues, optionally filtered by severity."""
-        issues = self._issues.query({"status": IssueStatus.OPEN})
-        if severity:
-            issues = [i for i in issues if i.severity == severity]
-        return issues
-    
-    def resolve_issue(self, issue_id: str, notes: str = "") -> None:
-        """Resolve an issue."""
-        issue = self._issues.get(issue_id)
-        if issue:
-            issue.resolve(notes)
-    
-    def generate_issue_id(self) -> str:
-        """Generate a unique issue ID."""
-        self._counters["issue"] += 1
-        return f"issue_{self._counters['issue']:05d}"
-    
-    # ==================== Statistics ====================
-    
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get knowledge base statistics."""
+            if kind == "chunk":
+                chunk_vecs[item_id] = vec
+            elif kind == "claim":
+                claim_vecs[item_id] = vec
+        self.chunk_index.load_vectors(chunk_vecs, self._chunk_meta_map())
+        self.claim_index.load_vectors(claim_vecs, self._claim_meta_map())
+
+    # ------------------------------------------------------------- persistence
+    def _upsert(self, table: str, item_id: str, obj) -> None:
+        if not self._conn:
+            return
+        data = json.dumps(obj.model_dump(mode="json"))
+        self._conn.execute(
+            f"INSERT INTO {table} (id, data) VALUES (?, ?) "
+            f"ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+            (item_id, data),
+        )
+        self._conn.commit()
+
+    def _save_embeddings(self, kind: str, vectors: Dict[str, List[float]]) -> None:
+        if not self._conn or not vectors:
+            return
+        self._conn.executemany(
+            "INSERT INTO embeddings (kind, id, vector) VALUES (?, ?, ?) "
+            "ON CONFLICT(kind, id) DO UPDATE SET vector=excluded.vector",
+            [(kind, i, json.dumps(v)) for i, v in vectors.items()],
+        )
+        self._conn.commit()
+
+    def persist(self) -> None:
+        """Flush everything to disk (idempotent; also called incrementally)."""
+        if not self._conn:
+            return
+        stores = {
+            "papers": (self.papers, "paper_id"),
+            "chunks": (self.chunks, "chunk_id"),
+            "claims": (self.claims, "claim_id"),
+            "entities": (self.entities, "entity_id"),
+            "relations": (self.relations, "relation_id"),
+            "issues": (self.issues, "issue_id"),
+        }
+        for table, (store, id_field) in stores.items():
+            for item_id, obj in store.items():
+                self._upsert(table, item_id, obj)
+        self._conn.commit()
+
+    # ------------------------------------------------------------------ papers
+    def upsert_paper(self, paper: Paper) -> None:
+        self.papers[paper.paper_id] = paper
+        self._upsert("papers", paper.paper_id, paper)
+
+    def get_paper(self, paper_id: str) -> Optional[Paper]:
+        return self.papers.get(paper_id)
+
+    def all_papers(self) -> List[Paper]:
+        return list(self.papers.values())
+
+    def papers_map(self) -> Dict[str, Paper]:
+        return dict(self.papers)
+
+    def reviewed_papers(self) -> List[Paper]:
+        """Papers with real full text extracted (excludes abstract-only)."""
+        return [p for p in self.papers.values() if p.ingestion_status == _INGESTION_COMPLETE]
+
+    def reviewed_count(self) -> int:
+        return len(self.reviewed_papers())
+
+    # ------------------------------------------------------------------ chunks
+    def has_chunk(self, chunk_id: str) -> bool:
+        return chunk_id in self.chunks
+
+    def upsert_chunks(self, chunks: List[Chunk]) -> None:
+        new_index_items = []
+        for chunk in chunks:
+            if chunk.chunk_id not in self.chunks:
+                new_index_items.append((chunk.chunk_id, chunk.text, self._chunk_meta(chunk)))
+            self.chunks[chunk.chunk_id] = chunk
+            self._upsert("chunks", chunk.chunk_id, chunk)
+        if new_index_items:
+            embedded = self.chunk_index.add(new_index_items)
+            self._save_embeddings("chunk", embedded)
+
+    def get_chunk(self, chunk_id: str) -> Optional[Chunk]:
+        return self.chunks.get(chunk_id)
+
+    def all_chunks(self) -> List[Chunk]:
+        return list(self.chunks.values())
+
+    def chunks_map(self) -> Dict[str, Chunk]:
+        return dict(self.chunks)
+
+    def chunks_for_paper(self, paper_id: str) -> List[Chunk]:
+        return [c for c in self.chunks.values() if c.paper_id == paper_id]
+
+    def search_chunks(self, query: str, k: int = 25,
+                      filters: Optional[Dict[str, Any]] = None) -> List[Tuple[Chunk, float]]:
+        hits = self.chunk_index.search(query, k=k, filters=filters)
+        out = []
+        for chunk_id, score in hits:
+            chunk = self.chunks.get(chunk_id)
+            if chunk:
+                out.append((chunk, score))
+        return out
+
+    # ------------------------------------------------------------------ claims
+    def upsert_claims(self, claims: List[Claim]) -> None:
+        new_index_items = []
+        for claim in claims:
+            if claim.claim_id not in self.claims:
+                new_index_items.append((claim.claim_id, claim.text, self._claim_meta(claim)))
+            self.claims[claim.claim_id] = claim
+            self._upsert("claims", claim.claim_id, claim)
+        if new_index_items:
+            embedded = self.claim_index.add(new_index_items)
+            self._save_embeddings("claim", embedded)
+
+    def replace_claims(self, claims: Dict[str, Claim]) -> None:
+        """Overwrite claim records in place (used by KB curator after linking)."""
+        self.claims = dict(claims)
+        for cid, claim in self.claims.items():
+            self._upsert("claims", cid, claim)
+
+    def get_claim(self, claim_id: str) -> Optional[Claim]:
+        return self.claims.get(claim_id)
+
+    def all_claims(self) -> List[Claim]:
+        return list(self.claims.values())
+
+    def claims_map(self) -> Dict[str, Claim]:
+        return dict(self.claims)
+
+    def search_claims(self, query: str, k: int = 60,
+                      filters: Optional[Dict[str, Any]] = None) -> List[Tuple[Claim, float]]:
+        hits = self.claim_index.search(query, k=k, filters=filters)
+        out = []
+        for claim_id, score in hits:
+            claim = self.claims.get(claim_id)
+            if claim:
+                out.append((claim, score))
+        return out
+
+    # --------------------------------------------------------- extraction bookkeeping
+    def mark_chunks_extracted(self, chunk_ids: List[str]) -> None:
+        for cid in chunk_ids:
+            self._extracted_chunk_ids.add(cid)
+        if self._conn and chunk_ids:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO extracted_chunks (chunk_id) VALUES (?)",
+                [(cid,) for cid in chunk_ids],
+            )
+            self._conn.commit()
+
+    def unextracted_chunks(self) -> List[Chunk]:
+        return [c for c in self.chunks.values() if c.chunk_id not in self._extracted_chunk_ids]
+
+    # ---------------------------------------------------------------- entities
+    def upsert_entity(self, entity: Entity) -> None:
+        self.entities[entity.entity_id] = entity
+        self._upsert("entities", entity.entity_id, entity)
+
+    def replace_entities(self, entities: Dict[str, Entity]) -> None:
+        # Remove rows that no longer exist (post-merge) then rewrite the rest.
+        if self._conn:
+            self._conn.execute("DELETE FROM entities")
+            self._conn.commit()
+        self.entities = dict(entities)
+        for eid, entity in self.entities.items():
+            self._upsert("entities", eid, entity)
+
+    def all_entities(self) -> List[Entity]:
+        return list(self.entities.values())
+
+    def entities_map(self) -> Dict[str, Entity]:
+        return dict(self.entities)
+
+    # --------------------------------------------------------------- relations
+    def upsert_relation(self, relation: Relation) -> None:
+        self.relations[relation.relation_id] = relation
+        self._upsert("relations", relation.relation_id, relation)
+
+    def replace_relations(self, relations: Dict[str, Relation]) -> None:
+        if self._conn:
+            self._conn.execute("DELETE FROM relations")
+            self._conn.commit()
+        self.relations = dict(relations)
+        for rid, relation in self.relations.items():
+            self._upsert("relations", rid, relation)
+
+    def all_relations(self) -> List[Relation]:
+        return list(self.relations.values())
+
+    def relations_map(self) -> Dict[str, Relation]:
+        return dict(self.relations)
+
+    # ------------------------------------------------------------------ issues
+    def upsert_issue(self, issue: Issue) -> None:
+        self.issues[issue.issue_id] = issue
+        self._upsert("issues", issue.issue_id, issue)
+
+    # ------------------------------------------------------------------- stats
+    def stats(self) -> Dict[str, Any]:
         return {
-            "papers_total": self._papers.count(),
-            "papers_ingested": len(self.get_ingested_papers()),
-            "chunks": len(self._chunks),
-            "claims": self._claims.count(),
-            "entities": self._entities.count(),
-            "relations": self._relations.count(),
-            "issues_total": self._issues.count(),
-            "issues_open": len(self.get_open_issues()),
-            "issues_blockers": len(self.get_open_issues(IssueSeverity.BLOCKER)),
+            "corpus_id": self.corpus_id,
+            "papers_total": len(self.papers),
+            "papers_reviewed": self.reviewed_count(),
+            "chunks": len(self.chunks),
+            "claims": len(self.claims),
+            "entities": len(self.entities),
+            "relations": len(self.relations),
+            "chunk_index": self.chunk_index.count(),
+            "claim_index": self.claim_index.count(),
         }
-    
-    # ==================== Persistence ====================
-    
-    def save(self) -> None:
-        """Persist knowledge base to disk."""
-        if not self.persist_dir:
-            return
-        
-        os.makedirs(self.persist_dir, exist_ok=True)
-        
-        # Save vector store
-        self._vector_store.save()
-        
-        # Save structured data as JSON
-        data = {
-            "papers": [p.model_dump() for p in self._papers.get_all()],
-            "chunks": [c.model_dump() for c in self._chunks.values()],
-            "claims": [c.model_dump() for c in self._claims.get_all()],
-            "entities": [e.model_dump() for e in self._entities.get_all()],
-            "relations": [r.model_dump() for r in self._relations.get_all()],
-            "issues": [i.model_dump() for i in self._issues.get_all()],
-            "counters": self._counters,
+
+    def export_graph(self) -> Dict[str, Any]:
+        """Export the knowledge graph for inspection/visualisation."""
+        return {
+            "corpus_id": self.corpus_id,
+            "papers": [p.model_dump(mode="json") for p in self.papers.values()],
+            "entities": [e.model_dump(mode="json") for e in self.entities.values()],
+            "relations": [r.model_dump(mode="json") for r in self.relations.values()],
+            "claims": [c.model_dump(mode="json") for c in self.claims.values()],
         }
-        
-        with open(os.path.join(self.persist_dir, "knowledge_base.json"), "w") as f:
-            json.dump(data, f, indent=2, default=str)
-    
-    def load(self) -> None:
-        """Load knowledge base from disk."""
-        kb_path = os.path.join(self.persist_dir, "knowledge_base.json")
-        if not os.path.exists(kb_path):
-            return
-        
-        with open(kb_path, "r") as f:
-            data = json.load(f)
-        
-        # Load papers
-        for p_data in data.get("papers", []):
-            paper = Paper(**p_data)
-            self._papers.save(paper)
-        
-        # Load chunks
-        for c_data in data.get("chunks", []):
-            chunk = Chunk(**c_data)
-            self._chunks[chunk.chunk_id] = chunk
-        
-        # Load claims
-        for c_data in data.get("claims", []):
-            claim = Claim(**c_data)
-            self._claims.save(claim)
-        
-        # Load entities
-        for e_data in data.get("entities", []):
-            entity = Entity(**e_data)
-            self._entities.save(entity)
-        
-        # Load relations
-        for r_data in data.get("relations", []):
-            relation = Relation(**r_data)
-            self._relations.save(relation)
-        
-        # Load issues
-        for i_data in data.get("issues", []):
-            issue = Issue(**i_data)
-            self._issues.save(issue)
-        
-        # Load counters
-        self._counters = data.get("counters", self._counters)
-    
+
+    # ------------------------------------------------------------------ helpers
+    def _chunk_meta(self, chunk: Chunk) -> Dict[str, Any]:
+        return {"paper_id": chunk.paper_id, "source_type": chunk.source_type.value,
+                "language": chunk.metadata.language}
+
+    def _claim_meta(self, claim: Claim) -> Dict[str, Any]:
+        return {"paper_id": claim.paper_id, "claim_type": claim.claim_type.value}
+
+    def _chunk_meta_map(self) -> Dict[str, Dict[str, Any]]:
+        return {c.chunk_id: self._chunk_meta(c) for c in self.chunks.values()}
+
+    def _claim_meta_map(self) -> Dict[str, Dict[str, Any]]:
+        return {c.claim_id: self._claim_meta(c) for c in self.claims.values()}
+
     def clear(self) -> None:
-        """Clear all data from knowledge base."""
-        self._papers.clear()
-        self._chunks.clear()
-        self._claims.clear()
-        self._entities.clear()
-        self._relations.clear()
-        self._issues.clear()
-        self._vector_store.clear()
-        self._counters = {"claim": 0, "entity": 0, "relation": 0, "issue": 0}
+        self.papers.clear(); self.chunks.clear(); self.claims.clear()
+        self.entities.clear(); self.relations.clear(); self.issues.clear()
+        self._extracted_chunk_ids.clear()
